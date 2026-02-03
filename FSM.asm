@@ -52,6 +52,36 @@ $LIST
 
 
 
+Display_Voltage_7seg:
+	
+	mov dptr, #myLUT
+
+	mov a, bcd+1
+	swap a
+	anl a, #0FH
+	movc a, @a+dptr
+	anl a, #0x7f ; Turn on decimal point
+	mov HEX3, a
+	
+	mov a, bcd+1
+	anl a, #0FH
+	movc a, @a+dptr
+	mov HEX2, a
+
+	mov a, bcd+0
+	swap a
+	anl a, #0FH
+	movc a, @a+dptr
+	mov HEX1, a
+	
+	mov a, bcd+0
+	anl a, #0FH
+	movc a, @a+dptr
+	mov HEX0 , a 
+	
+	ret
+
+
 
 
 FSM:    
