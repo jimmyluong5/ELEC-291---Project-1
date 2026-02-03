@@ -7,6 +7,29 @@ $MODMAX10
 ;cjne - compare and jump if not equal
 ;pwm - pulse wave modulation 
 ;subb - subtract with borrow
+
+DSEG at 30H
+x: ds 1 ;x and y are 4 bytes (32 bits)
+y: ds 1 
+curr_temp: ds 1
+temp_soak: ds 1
+temp_reflow: ds 1
+time_soak: ds 1
+time_reflow: ds 1
+FSM_state: ds 1
+
+BSEG
+mf: dbit 1 ;flag
+start: dbit 1
+shut_down: dbit 1
+FSM_state: dbit 3
+
+main: 
+;initialize the states
+	clr FSM_state ;we start in state 0.
+
+
+
 FSM:    
 	mov a, FSM_state ;move the state into reg a.
 
@@ -18,7 +41,7 @@ FSM_state0:
 	mov FSM_state, #1
 	
 FSM_state0_done:
-	ljmp FSM2 ??
+	ljmp FSM2
 
 FSM_state1:
 	cjne a, #1, FSM_state2
@@ -31,7 +54,7 @@ FSM_state1:
 	mov FSM_state, #2
 	
 FSM_state1_done:
-	ljmp FSM2 ??
+	ljmp FSM2
 	
 	
 FSM_state2:
@@ -44,5 +67,5 @@ FSM_state2:
 	mov FSM_state, #3
 	
 FSM_state2_done:
-	ljmp FSM2 ??
+	ljmp FSM2	
 
