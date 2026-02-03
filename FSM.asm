@@ -24,6 +24,25 @@ start: dbit 1
 shut_down: dbit 1
 FSM_state: dbit 3
 
+
+$include(math32.asm)
+
+cseg
+; These 'equ' must match the wiring between the DE10Lite board and the LCD!
+; P0 is in connector JPIO.  Check "CV-8052 Soft Processor in the DE10Lite Board: Getting
+; Started Guide" for the details.
+ELCD_RS equ P0.0   ; instead of 1.7
+; ELCD_RW equ Px.x ; Not used.  Connected to ground 
+ELCD_E  equ P0.2 ; instead of 1.1
+ELCD_D4 equ P0.7
+ELCD_D5 equ P0.5
+ELCD_D6 equ P0.3
+ELCD_D7 equ P0.1
+$NOLIST
+$include(LCD_4bit_DE10Lite_no_RW.inc) ; A library of LCD related functions and utility macros
+$LIST
+
+
 main: 
 ;initialize the states
 	clr FSM_state ;we start in state 0.
