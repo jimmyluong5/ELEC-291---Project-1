@@ -8,7 +8,7 @@ $MODMAX10
 ;pwm - pulse wave modulation 
 ;subb - subtract with borrow
 FSM:    
-	mov a, FSM1_state ;move the state into reg a.
+	mov a, FSM_state ;move the state into reg a.
 
 FSM_state0:
 	cjne a, #0, FSM_state1 ;if a is not 0 move to state1
@@ -18,7 +18,7 @@ FSM_state0:
 	mov FSM_state, #1
 	
 FSM_state0_done:
-	ljmp FSM2
+	ljmp FSM2 ??
 
 FSM_state1:
 	cjne a, #1, FSM_state2
@@ -31,7 +31,7 @@ FSM_state1:
 	mov FSM_state, #2
 	
 FSM_state1_done:
-	ljmp FSM2
+	ljmp FSM2 ??
 	
 	
 FSM_state2:
@@ -44,5 +44,5 @@ FSM_state2:
 	mov FSM_state, #3
 	
 FSM_state2_done:
-	ljmp FSM2	
+	ljmp FSM2 ??
 
