@@ -8,6 +8,8 @@ $MODMAX10
 ;pwm - pulse wave modulation 
 ;subb - subtract with borrow
 
+temp_message:     db 'Temperature', 0
+
 DSEG at 30H
 x: ds 1 ;x and y are 4 bytes (32 bits)
 y: ds 1 
@@ -43,9 +45,6 @@ $include(LCD_4bit_DE10Lite_no_RW.inc) ; A library of LCD related functions and u
 $LIST
 
 
-main: 
-;initialize the states
-	clr FSM_state ;we start in state 0.
 
 
 
@@ -88,3 +87,20 @@ FSM_state2:
 FSM_state2_done:
 	ljmp FSM2	
 
+
+main: 
+;initialize the states
+	clr FSM_state ;we start in state 0.
+
+mov sp, #0x7f
+clr a
+
+
+Set_Cursor(2, 1)
+Send_Constant_String(#temp_message)
+
+forever:
+lcall FSM
+ljump forever
+
+end
