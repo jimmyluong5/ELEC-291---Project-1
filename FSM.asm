@@ -131,8 +131,13 @@ main:
 mov sp, #0x7f
 clr a
 
+; COnfigure the pins connected to the LCD as outputs
+	mov P0MOD, #10101111b ; P0.1, P0.3, P0.5, P0.7 are outputs.  ('1' makes the pin output)
+    mov P1MOD, #10000010b ; P1.7 and P1.1 are outputs
 
-Set_Cursor(2, 1)
+
+
+Set_Cursor(1, 1)
 Send_Constant_String(#temp_message)
 
 forever:
