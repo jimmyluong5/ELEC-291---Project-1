@@ -1,8 +1,23 @@
-FSM showing numbers
+;FSM showing numbers
+;each button clicking will result in changing states
 
-each button clicking will result in changing states
+$NOLIST
+$MODN76E003
+$LIST
 
-button		equ 0.0
+;this is just defining variables
+CLK           EQU 16600000 ; Microcontroller system frequency in Hz
+TIMER0_RATE   EQU 4096     ; 2048Hz squarewave (peak amplitude of CEM-1203 speaker)
+TIMER0_RELOAD EQU ((65536-(CLK/TIMER0_RATE)))
+TIMER2_RATE   EQU 1000     ; 1000Hz, for a timer tick of 1ms
+TIMER2_RELOAD EQU ((65536-(CLK/TIMER2_RATE)))
+
+button_click		equ 0.0
+
+$NOLIST
+$include(LCD_4bit.inc) ; A library of LCD related functions and utility macros
+$LIST
+
 
 
 ;strings
@@ -22,13 +37,35 @@ shut_down: dbit 1
 button: dbit 1
 is_clicked: dbit 1
 
+cseg
+; These 'equ' must match the hardware wiring
+LCD_RS equ P1.3
+;LCD_RW equ PX.X ; Not used in this code, connect the pin to GND
+LCD_E  equ P1.4
+LCD_D4 equ P0.0
+LCD_D5 equ P0.1
+LCD_D6 equ P0.2
+LCD_D7 equ P0.3
+
+
+WaitmilliSec:
+    push AR0
+    push AR1
+x_L3: mov R1, #50 ;50ms
+x_L2: mov R0, #100
+x_L1: djnz R0, x_L1 ; 4 cycles->4*60.24ns*104=25.0us
+    djnz R1, x_L2 ; 25us*40=1.0ms
+    djnz R2, x_L3 ; number of millisecons to wait passed in R2
+    pop AR1
+    pop AR0
+    ret
 
 state0:
 	jb button, state0 ;if we didn't click the button we stay in state0, else we clicked the button
-	Wait50Milliseconds(#50)
+	lcall WaitmilliSec
 	jb button, state0
 
-	cjne is_clicked, #0, state1 ;not zero so we clicked the button
+	jnb is_clicked, state1 ;not zero so we clicked the button
 	
 	;go to state1
 	Set_Cursor(1,1)
@@ -38,10 +75,10 @@ state0:
 state1:
 	clr is_clicked
 	jb button, state1 ;if we didn't click the button we stay in state0, else we clicked the button
-	Wait50Milliseconds(#50)
+	lcall WaitmilliSec
 	jb button, state1
 
-	cjne is_clicked, #0, state2 ;not zero so we clicked the button
+	jnb is_clicked, state3 ;not zero so we clicked the button
 	
 	;go to state1
 	Set_Cursor(1,1)
@@ -51,10 +88,10 @@ state1:
 state2:
 	clr is_clicked
 	jb button, state2 ;if we didn't click the button we stay in state0, else we clicked the button
-	Wait50Milliseconds(#50)
+	lcall WaitmilliSec
 	jb button, state2
 
-	cjne is_clicked, #0, state3 ;not zero so we clicked the button
+	jnb is_clicked, state3 ;not zero so we clicked the button
 	
 	
 	Set_Cursor(1,1)
@@ -65,11 +102,10 @@ state2:
 state3:
 	clr is_clicked
 	jb button, state3 ;if we didn't click the button we stay in state0, else we clicked the button
-	Wait50Milliseconds(#50)
+	lcall WaitmilliSec
 	jb button, state3
 
-	cjne is_clicked, #0, state4 ;not zero so we clicked the button
-	
+	jnb is_clicked, state4 ;not zero so we clicked the button
 
 	Set_Cursor(1,1)
 	Send_Constant_String(#state3_message) ;display on the LCD
@@ -78,16 +114,19 @@ state3:
 state4:
 	clr is_clicked
 	jb button, state4 ;if we didn't click the button we stay in state0, else we clicked the button
-	Wait50Milliseconds(#50)
+	lcall WaitmilliSec
 	jb button, state4
 
-	cjne is_clicked, #0, state0 ;not zero so we clicked the button
+	jnb is_clicked, state0_done ;not zero so we clicked the button
 	
 	;go to state1
 	Set_Cursor(1,1)
 	Send_Constant_String(#state4_message) ;display on the LCD
 	sjmp state4
 
+
+state0_done:
+ljmp state0
 main:
 	
 ; Initialization
@@ -99,7 +138,7 @@ main:
     mov P3M1, #0x00
     mov P3M2, #0x00
 
-	ljmp state0
+ljmp state0
 
 
 
