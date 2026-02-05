@@ -1,0 +1,105 @@
+FSM showing numbers
+
+each button clicking will result in changing states
+
+button		equ 0.0
+
+
+;strings
+state0_message: db 'state0', 0
+state1_message: db 'state1', 0
+state2_message: db 'state2', 0
+state3_message: db 'state3', 0
+state4_message: db 'state4', 0
+
+DSEG at 30H
+state: ds 1
+
+BSEG
+mf: dbit 1
+start: dbit 1
+shut_down: dbit 1
+button: dbit 1
+is_clicked: dbit 1
+
+
+state0:
+	jb button, state0 ;if we didn't click the button we stay in state0, else we clicked the button
+	Wait50Milliseconds(#50)
+	jb button, state0
+
+	cjne is_clicked, #0, state1 ;not zero so we clicked the button
+	
+	;go to state1
+	Set_Cursor(1,1)
+	Send_Constant_String(#state0_message) ;display on the LCD
+	sjmp state0
+
+state1:
+	clr is_clicked
+	jb button, state1 ;if we didn't click the button we stay in state0, else we clicked the button
+	Wait50Milliseconds(#50)
+	jb button, state1
+
+	cjne is_clicked, #0, state2 ;not zero so we clicked the button
+	
+	;go to state1
+	Set_Cursor(1,1)
+	Send_Constant_String(#state1_message) ;display on the LCD
+	sjmp state1
+
+state2:
+	clr is_clicked
+	jb button, state2 ;if we didn't click the button we stay in state0, else we clicked the button
+	Wait50Milliseconds(#50)
+	jb button, state2
+
+	cjne is_clicked, #0, state3 ;not zero so we clicked the button
+	
+	
+	Set_Cursor(1,1)
+	Send_Constant_String(#state2_message) ;display on the LCD
+	sjmp state2
+
+
+state3:
+	clr is_clicked
+	jb button, state3 ;if we didn't click the button we stay in state0, else we clicked the button
+	Wait50Milliseconds(#50)
+	jb button, state3
+
+	cjne is_clicked, #0, state4 ;not zero so we clicked the button
+	
+
+	Set_Cursor(1,1)
+	Send_Constant_String(#state3_message) ;display on the LCD
+	sjmp state3
+
+state4:
+	clr is_clicked
+	jb button, state4 ;if we didn't click the button we stay in state0, else we clicked the button
+	Wait50Milliseconds(#50)
+	jb button, state4
+
+	cjne is_clicked, #0, state0 ;not zero so we clicked the button
+	
+	;go to state1
+	Set_Cursor(1,1)
+	Send_Constant_String(#state4_message) ;display on the LCD
+	sjmp state4
+
+main:
+	
+; Initialization
+    mov SP, #0x7F
+    mov P0M1, #0x00
+    mov P0M2, #0x00
+    mov P1M1, #0x00
+    mov P1M2, #0x00
+    mov P3M1, #0x00
+    mov P3M2, #0x00
+
+	ljmp state0
+
+
+
