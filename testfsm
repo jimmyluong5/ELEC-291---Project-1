@@ -1,144 +1,169 @@
-;FSM showing numbers
-;each button clicking will result in changing states
+$MODMAX10
 
-$NOLIST
-$MODN76E003
-$LIST
+CSEG at 0
+    ljmp mycode
 
-;this is just defining variables
-CLK           EQU 16600000 ; Microcontroller system frequency in Hz
-TIMER0_RATE   EQU 4096     ; 2048Hz squarewave (peak amplitude of CEM-1203 speaker)
-TIMER0_RELOAD EQU ((65536-(CLK/TIMER0_RATE)))
-TIMER2_RATE   EQU 1000     ; 1000Hz, for a timer tick of 1ms
-TIMER2_RELOAD EQU ((65536-(CLK/TIMER2_RATE)))
-
-button_click		equ 0.0
-
-$NOLIST
-$include(LCD_4bit.inc) ; A library of LCD related functions and utility macros
-$LIST
-
-
-
-;strings
-state0_message: db 'state0', 0
-state1_message: db 'state1', 0
-state2_message: db 'state2', 0
-state3_message: db 'state3', 0
-state4_message: db 'state4', 0
-
-DSEG at 30H
-state: ds 1
+DSEG at 30h
+x:      ds  4
+y:      ds  4
+bcd:    ds  5
+state:  ds  1 ; Variable to keep track of current state
 
 BSEG
-mf: dbit 1
-start: dbit 1
-shut_down: dbit 1
-button: dbit 1
-is_clicked: dbit 1
+mf:     dbit 1
 
-cseg
-; These 'equ' must match the hardware wiring
-LCD_RS equ P1.3
-;LCD_RW equ PX.X ; Not used in this code, connect the pin to GND
-LCD_E  equ P1.4
-LCD_D4 equ P0.0
-LCD_D5 equ P0.1
-LCD_D6 equ P0.2
-LCD_D7 equ P0.3
+; Constants
+FREQ    EQU 33333333
+BAUD    EQU 115200
+T2LOAD  EQU 65536-(FREQ/(32*BAUD))
 
+; Hardware mapping for DE10-Lite
+BUTTON  EQU KEY.1  ; KEY1 for state transition
 
-WaitmilliSec:
-    push AR0
-    push AR1
-x_L3: mov R1, #50 ;50ms
-x_L2: mov R0, #100
-x_L1: djnz R0, x_L1 ; 4 cycles->4*60.24ns*104=25.0us
-    djnz R1, x_L2 ; 25us*40=1.0ms
-    djnz R2, x_L3 ; number of millisecons to wait passed in R2
-    pop AR1
-    pop AR0
+$include(math32.asm)
+
+; LCD Pin Mapping
+LCD_RS equ P0.0 
+LCD_E  equ P0.2 
+LCD_D4 equ P0.7
+LCD_D5 equ P0.5
+LCD_D6 equ P0.3
+LCD_D7 equ P0.1 
+
+$NOLIST
+$include(LCD_4bit_DE10Lite_no_RW.inc)
+$LIST
+
+; Strings for the FSM
+state0_msg: db 'State: Idle    ', 0
+state1_msg: db 'State: Sampling', 0
+state2_msg: db 'State: High Vol', 0
+state3_msg: db 'State: Low Vol ', 0
+
+myLUT:
+    DB 0xC0, 0xF9, 0xA4, 0xB0, 0x99, 0x92, 0x82, 0xF8, 0x80, 0x90
+
+; --- Subroutines ---
+
+InitSerialPort:
+    clr TR2
+    mov T2CON, #30H
+    mov RCAP2H, #high(T2LOAD)
+    mov RCAP2L, #low(T2LOAD)
+    setb TR2
+    mov SCON, #52H
     ret
 
-state0:
-	jb button, state0 ;if we didn't click the button we stay in state0, else we clicked the button
-	lcall WaitmilliSec
-	jb button, state0
+Wait50ms:
+    mov R0, #30
+x_L3: mov R1, #74
+x_L2: mov R2, #250
+x_L1: djnz R2, x_L1
+    djnz R1, x_L2
+    djnz R0, x_L3
+    ret
 
-	jnb is_clicked, state1 ;not zero so we clicked the button
-	
-	;go to state1
-	Set_Cursor(1,1)
-	Send_Constant_String(#state0_message) ;display on the LCD
-	sjmp state0
+Display_Voltage_LCD:
+    Set_Cursor(2,1)
+    mov a, #'V'
+    lcall ?WriteData
+    mov a, #'='
+    lcall ?WriteData
+    mov a, bcd+1
+    swap a
+    anl a, #0FH
+    orl a, #'0'
+    lcall ?WriteData
+    mov a, #'.'
+    lcall ?WriteData
+    mov a, bcd+1
+    anl a, #0FH
+    orl a, #'0'
+    lcall ?WriteData
+    mov a, bcd+0
+    swap a
+    anl a, #0FH
+    orl a, #'0'
+    lcall ?WriteData
+    mov a, bcd+0
+    anl a, #0FH
+    orl a, #'0'
+    lcall ?WriteData
+    ret
 
-state1:
-	clr is_clicked
-	jb button, state1 ;if we didn't click the button we stay in state0, else we clicked the button
-	lcall WaitmilliSec
-	jb button, state1
+; --- Main Program ---
 
-	jnb is_clicked, state3 ;not zero so we clicked the button
-	
-	;go to state1
-	Set_Cursor(1,1)
-	Send_Constant_String(#state1_message) ;display on the LCD
-	sjmp state1
+mycode:
+    mov SP, #7FH
+    mov P0MOD, #10101111b
+    mov P1MOD, #10000010b
+    
+    lcall InitSerialPort
+    lcall ELCD_4BIT
+    
+    mov ADC_C, #0x80 ; Reset ADC
+    lcall Wait50ms
+    
+    mov state, #0   ; Initialize FSM to State 0
+    lcall Update_State_Display
 
-state2:
-	clr is_clicked
-	jb button, state2 ;if we didn't click the button we stay in state0, else we clicked the button
-	lcall WaitmilliSec
-	jb button, state2
+forever:
+    ; --- Part 1: Voltmeter Logic ---
+    mov a, SWA 
+    anl a, #0x07
+    mov ADC_C, a
+    
+    mov x+3, #0
+    mov x+2, #0
+    mov x+1, ADC_H
+    mov x+0, ADC_L
+    
+    Load_y(5000)
+    lcall mul32
+    Load_y(4096)
+    lcall div32
+    
+    lcall hex2bcd
+    lcall Display_Voltage_LCD ; Update voltage on Line 2
+    
+    ; --- Part 2: FSM / Button Logic ---
+    jb BUTTON, no_press     ; If button is NOT pressed, skip
+    lcall Wait50ms          ; Debounce
+    jb BUTTON, no_press     ; Double check
+    
+    ; Button was pressed! Change state logic:
+    inc state
+    mov a, state
+    cjne a, #4, skip_reset  ; If we hit state 4, go back to 0
+    mov state, #0
+skip_reset:
+    lcall Update_State_Display
+    
+    ; Wait for button release so it doesn't skip states
+wait_release:
+    jnb BUTTON, wait_release
 
-	jnb is_clicked, state3 ;not zero so we clicked the button
-	
-	
-	Set_Cursor(1,1)
-	Send_Constant_String(#state2_message) ;display on the LCD
-	sjmp state2
+no_press:
+    lcall Wait50ms ; Small loop delay
+    ljmp forever
 
+; Helper to refresh Line 1 of LCD based on state
+Update_State_Display:
+    Set_Cursor(1, 1)
+    mov a, state
+    cjne a, #0, check1
+    Send_Constant_String(#state0_msg)
+    ret
+check1:
+    cjne a, #1, check2
+    Send_Constant_String(#state1_msg)
+    ret
+check2:
+    cjne a, #2, check3
+    Send_Constant_String(#state2_msg)
+    ret
+check3:
+    Send_Constant_String(#state3_msg)
+    ret
 
-state3:
-	clr is_clicked
-	jb button, state3 ;if we didn't click the button we stay in state0, else we clicked the button
-	lcall WaitmilliSec
-	jb button, state3
-
-	jnb is_clicked, state4 ;not zero so we clicked the button
-
-	Set_Cursor(1,1)
-	Send_Constant_String(#state3_message) ;display on the LCD
-	sjmp state3
-
-state4:
-	clr is_clicked
-	jb button, state4 ;if we didn't click the button we stay in state0, else we clicked the button
-	lcall WaitmilliSec
-	jb button, state4
-
-	jnb is_clicked, state0_done ;not zero so we clicked the button
-	
-	;go to state1
-	Set_Cursor(1,1)
-	Send_Constant_String(#state4_message) ;display on the LCD
-	sjmp state4
-
-
-state0_done:
-ljmp state0
-main:
-	
-; Initialization
-    mov SP, #0x7F
-    mov P0M1, #0x00
-    mov P0M2, #0x00
-    mov P1M1, #0x00
-    mov P1M2, #0x00
-    mov P3M1, #0x00
-    mov P3M2, #0x00
-
-ljmp state0
-
-
-
+end
