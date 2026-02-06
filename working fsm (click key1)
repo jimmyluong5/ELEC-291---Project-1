@@ -35,10 +35,10 @@ $include(LCD_4bit_DE10Lite_no_RW1.inc)
 $LIST
 
 ; Strings for the FSM
-state0_msg: db 'State: Idle    ', 0
-state1_msg: db 'State: Sampling', 0
-state2_msg: db 'State: High Vol', 0
-state3_msg: db 'State: Low Vol ', 0
+state0_msg: db 'State: 0    ', 0
+state1_msg: db 'State: 1', 0
+state2_msg: db 'State: 2', 0
+state3_msg: db 'State: 3 ', 0
 
 myLUT:
     DB 0xC0, 0xF9, 0xA4, 0xB0, 0x99, 0x92, 0x82, 0xF8, 0x80, 0x90
