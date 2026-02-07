@@ -159,10 +159,10 @@ Configure_Keypad_Pins:
     ret
 
 Keypad:
-    jb KEY.1, keypad_L0
+    jb KEY.2, keypad_L0
     lcall Wait25ms 
-    jb KEY.1, keypad_L0
-    jnb KEY.1, $ 
+    jb KEY.2, keypad_L0
+    jnb KEY.2, $ 
     lcall Shift_Digits_Right
     clr c
     ret
@@ -304,6 +304,7 @@ Shift_Digits_Right_L0:
 mycode: 
     mov SP, #7FH
     mov P0MOD, #10101111b
+    mov P1MOD, #10000010b
     lcall Configure_Keypad_Pins ; Setup keypad pins
     
     setb reset
@@ -396,7 +397,7 @@ state1:
     ret
 state2:
     cjne a, #2, state3
-    Send_Constant_String(#state3_msg)
+    Send_Constant_String(#state2_msg)
     ret
 state3:
     cjne a, #3, state4
