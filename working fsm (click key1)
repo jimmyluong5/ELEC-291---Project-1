@@ -3,6 +3,8 @@ $MODMAX10
 CSEG at 0
     ljmp mycode
 
+
+
 DSEG at 30h
 x:      ds  4
 y:      ds  4
@@ -22,6 +24,7 @@ BUTTON  EQU KEY.1  ; KEY1 for state transition
 reset equ P1.3 ;this key will be for resetting to state 0
 
 $include(math32.asm)
+$include(Read_keypad1.asm)
 
 ; LCD Pin Mapping
 LCD_RS equ P0.0 
@@ -45,8 +48,9 @@ state5_msg: db 'State: 5', 0
 state6_msg: db 'State: 6 ', 0
 test_msg: db 'test', 0
 myLUT:
-    DB 0xC0, 0xF9, 0xA4, 0xB0, 0x99, 0x92, 0x82, 0xF8, 0x80, 0x90
-
+    DB 0xC0, 0xF9, 0xA4, 0xB0, 0x99        ; 0 TO 4
+    DB 0x92, 0x82, 0xF8, 0x80, 0x90        ; 4 TO 9
+    DB 0x88, 0x83, 0xC6, 0xA1, 0x86, 0x8E  ; A to F
 ; --- Subroutines ---
 
 InitSerialPort:
@@ -102,6 +106,14 @@ mycode:
     mov P0MOD, #10101111b
     mov P1MOD, #10000010b
     setb P1.3
+    setb P1.2
+    setb P1.4
+    setb P1.6
+    setb P2.0
+    setb P2.2
+    setb P2.4
+    setb P2.6
+    setb P3.0
     
     lcall InitSerialPort
     lcall LCD_4BIT
