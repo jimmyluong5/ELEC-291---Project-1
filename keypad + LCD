@@ -2,8 +2,8 @@ $NOLIST
 $MODMAX10
 $LIST
 
-CSEG at 0
-ljmp main_code
+	CSEG at 0
+	ljmp main_code
 
 	DSEG at 30H
 bcd:	ds 5
@@ -60,9 +60,8 @@ ENDMAC
 
 Display_7seg:
 	mov dptr, #myLUT
-	
-	$MESSAGE TIP: If digits 10, 9, 8, and 7 are not zero, LEDR7: on
-	
+
+
 	mov a, bcd+3
 	orl a, bcd+4
 	jz Display_L1
@@ -72,7 +71,6 @@ Display_L1:
 	clr LEDRA.7
 Display_L2:
 
-	$MESSAGE TIP: Pressing KEY3, displays the most significant digits of the 10-digit number
 	
 	jnb key.3, Display_high_digits
 	showBCD_7seg(bcd+0, HEX0, HEX1)
