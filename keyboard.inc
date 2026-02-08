@@ -40,10 +40,11 @@ ENDMAC
 
 
 Configure_Keypad_Pins:
-    orl P1MOD, #0b_01010100 
-    orl P2MOD, #0b_00000001 
-    anl P2MOD, #0b_10101011 
-    anl P3MOD, #0b_11111110 
+  ;goes from left to right, 7, 6, 5, 4, 3, 2, 1, 0
+  	orl P1MOD, #0b_01010100 ; P1.6, P1.4, P1.2 output
+	orl P2MOD, #0b_00000001 ; P2.0 output
+	anl P2MOD, #0b_10101011 ; P2.6, P2.4, P2.2 input
+	anl P3MOD, #0b_11111110 ; P3.0 input 
     ret
 
 Keypad:
@@ -80,7 +81,7 @@ Keypad_Key_Code:
     setb ROW2
     setb ROW3
     setb ROW4
-    jnb SWA.0, keypad_default
+    jnb SWA.7, keypad_default;switch 7 changes the keypad 90 degrees CCW
     ljmp keypad_90deg
 keypad_default: 
     clr ROW1
@@ -137,15 +138,15 @@ keypad_90deg:
     clr c
     ret
 
-Display:
+Display7seg:
     mov dptr, #myLUT
     mov a, bcd1+3
     orl a, bcd1+4
-    jz Display_L1
+   ; jz Display_L1
     setb LEDRA.7 
     sjmp Display_L2
-Display_L1:
-    clr LEDRA.7
+;Display_L1:
+ ;   clr LEDRA.7
 Display_L2:
     jnb key.3, Display_high_digits
     showBCD(bcd1+0, HEX0, HEX1)
