@@ -1,0 +1,354 @@
+$MODMAX10
+
+CSEG at 0
+    ljmp mycode
+
+DSEG at 30h
+x:      ds  4
+y:      ds  4
+bcd:    ds  5 ; Voltmeter BCD buffer 
+bcd1:   ds  5 ; Keypad BCD buffer
+state:  ds  1 ; Variable to keep track of current state 
+sw_state: ds 1 ; state for the switch 
+BSEG
+mf:     dbit 1
+
+
+; Constants
+FREQ    EQU 33333333
+BAUD    EQU 115200
+T2LOAD  EQU 65536-(FREQ/(32*BAUD))
+
+; Hardware mapping for DE10-Lite
+BUTTON  EQU KEY.1  ; KEY1 for state transition 
+reset   equ P1.3   ; this key will be for resetting to state 0 
+
+; Keypad Pins
+ROW1 EQU P1.2
+ROW2 EQU P1.4
+ROW3 EQU P1.6
+ROW4 EQU P2.0
+COL1 EQU P2.2
+COL2 EQU P2.4
+COL3 EQU P2.6
+COL4 EQU P3.0
+
+
+;switches used
+sw0 equ SWA.0 ;this will be used to display the temperature reading 
+sw1 equ SWA.1 ;used to display the voltage
+sw2 equ SWA.2 ;used to display the timer
+;reading an individual switch
+;jb sw0, switch_is_up ;jump to this label when the switch is high
+;jnb sw0, switch_is_down ;jump to this label when the switch is low
+
+;reading multiple switches at the same time
+;mov a, SWA ;moving the switch values from the SWA register into the accumulator
+;anl a, #00001111b ;only read the first 4 switch values only. (SW0 to SW4)
+
+ 
+
+
+$include(math32.asm)
+
+; LCD Pin Mapping 
+LCD_RS equ P0.0 
+LCD_E  equ P0.2 
+LCD_D4 equ P0.7
+LCD_D5 equ P0.5
+LCD_D6 equ P0.3
+LCD_D7 equ P0.1 
+
+$NOLIST
+$include(LCD_4bit_DE10Lite_no_RW1.inc)
+$include(keyboard.inc)
+$include(keypad_to_LCD.inc)
+$LIST
+
+; Strings for the FSM 
+state0_msg: db 'State: 0', 0
+state1_msg: db 'State: 1', 0
+state2_msg: db 'State: 2', 0
+state3_msg: db 'State: 3 ', 0
+state4_msg: db 'State: 4', 0
+state5_msg: db 'State: 5', 0
+state6_msg: db 'State: 6 ', 0
+test_msg: db 'test', 0
+clear_msg: db '                       ', 0
+
+
+
+; --- Integrated Subroutines ---
+
+InitSerialPort: 
+    clr TR2
+    mov T2CON, #30H
+    mov RCAP2H, #high(T2LOAD)
+    mov RCAP2L, #low(T2LOAD)
+    setb TR2
+    mov SCON, #52H
+    ret
+
+Wait50ms: 
+    mov R0, #30
+x_L3: mov R1, #74
+x_L2: mov R2, #250
+x_L1: djnz R2, x_L1
+    djnz R1, x_L2
+    djnz R0, x_L3
+    ret
+
+Wait25ms:
+    mov R0, #15
+L3_y: mov R1, #74
+L2_y: mov R2, #250
+L1_y: djnz R2, L1_y 
+    djnz R1, L2_y 
+    djnz R0, L3_y 
+    ret
+
+Display_Voltage_LCD: 
+    Set_Cursor(2,1)
+    mov a, #'V'
+    lcall ?WriteData
+    mov a, #'='
+    lcall ?WriteData
+    mov a, bcd+1
+    swap a
+    anl a, #0FH ;ensures we have a number between 0-9
+    orl a, #'0' ;because 0FH = 0000 1111
+    lcall ?WriteData
+    mov a, #'.'
+    lcall ?WriteData
+    mov a, bcd+1
+    anl a, #0FH
+    orl a, #'0'
+    lcall ?WriteData
+    mov a, bcd+0
+    swap a
+    anl a, #0FH
+    orl a, #'0'
+    lcall ?WriteData
+    mov a, bcd+0
+    anl a, #0FH
+    orl a, #'0'
+    lcall ?WriteData
+    ret
+
+clear7seg:
+	mov HEX0, #0FFH
+	mov HEX1, #0FFH
+	MOV HEX2, #0FFH
+	MOV HEX3, #0FFH
+	MOV HEX4, #0FFH
+	MOV HEX5, #0FFH
+ret
+
+turnoff_leds:
+	clr LEDRA.0
+	clr LEDRA.1
+	clr LEDRA.2
+	clr LEDRA.3
+	clr LEDRA.4
+	clr LEDRA.5
+	clr LEDRA.6
+	clr LEDRA.7
+
+ret
+
+voltage_reading_7seg:
+	;after we call hex2bcd, the value of the voltage is stored in x
+	;the value of x is stored in bcd spread out through 4 bytes
+	;need to convert these decimal numbers in the bcd to the look up table
+	
+	;need to use the accumulator register
+	mov dptr, #myLUT
+	
+	;display digit 0 and 1 from (bcd+0)
+	mov a, bcd+0
+	anl a, #0FH
+	movc a, @a+dptr ;movc is moving a constant, which is at address a+address of data ptr
+	;or getting the pattern from the look up table
+	mov HEX0, a ;send the value to the hex0
+	
+	mov a, bcd+0
+	swap a ;need to get the higher part ex. 1111 0000	
+	anl a, #0FH
+	movc a, @a+dptr
+	mov HEX1, a
+	
+	;repeat with the other bcd all the way to bcd+2
+	
+	mov a, bcd+1
+	anl a, #0FH
+	movc a, @a+dptr ;movc is moving a constant, which is at address a+address of data ptr
+	;or getting the pattern from the look up table
+	mov HEX2, a ;send
+	
+	mov a, bcd+1
+	swap a ;need to get the higher part ex. 1111 0000	
+	anl a, #0FH
+	movc a, @a+dptr
+	mov HEX3, a
+	
+	mov a, bcd+2
+	anl a, #0FH
+	movc a, @a+dptr ;movc is moving a constant, which is at address a+address of data ptr
+	;or getting the pattern from the look up table
+	mov HEX4, a ;send
+	
+	mov a, bcd+2
+	swap a ;need to get the higher part ex. 1111 0000	
+	anl a, #0FH
+	movc a, @a+dptr
+	mov HEX5, a
+ret
+
+
+
+voltage_reading:
+    ; --- Part 2: Voltmeter Logic --- 
+    mov a, SWA 
+    anl a, #0x07
+    mov ADC_C, a
+    
+    mov x+3, #0
+    mov x+2, #0
+    mov x+1, ADC_H
+    mov x+0, ADC_L
+    
+    Load_y(5000)
+    lcall mul32
+    Load_y(4096)
+    lcall div32
+    
+    Load_y(1000) ;convert to microvolts
+    lcall mul32
+    Load_y(12300);41*300 (gain of 300, replace with actual gain after)multipled by thermocouple wire temp change.
+    lcall div32
+    Load_y(22) ;cold junction temperature
+    lcall add32
+    ;after this, the result is stored in bcd spread out through 4 bytes.
+    
+    lcall hex2bcd
+   ;lcall Display_Voltage_LCD 
+ret
+
+
+; --- Main Program ---
+
+mycode: 
+    mov SP, #7FH
+    mov P0MOD, #10101111b ;1 = output, 0 = input. 
+    mov P1MOD, #10000010b
+    lcall Configure_Keypad_Pins ; Setup keypad pins
+  
+ 	 
+ 	lcall turnoff_leds 
+    lcall InitSerialPort
+    lcall LCD_4BIT
+    
+    mov ADC_C, #0x80 
+    lcall Wait50ms
+    
+    mov state, #0   
+    lcall Update_State_Display
+
+    mov R0, #0 ;this is the register for reset
+    mov sw_state, #0 ;0 is last state, 
+forever: 
+    ; --- Part 1: Keypad Logic (Non-Blocking) ---
+    lcall Keypad
+    jnc check_mode ; Carry is 0 if no key pressed
+    lcall Shift_Digits_Left
+
+check_mode:
+	;check if the switch is flicked up or not
+	jb SWA.6, mode_LCD
+	clr LEDRA.6 ;indicator for mode.
+	lcall turnoff_leds
+	;mode_7seg
+	;its not so we use the 7seg with keyboard and lcd for voltage
+    lcall Display7seg ; Update HEX displays with keypad data
+	lcall voltage_reading
+  	lcall Display_Voltage_LCD ;display voltage on lcd
+	ljmp fsm_part
+	
+mode_LCD: ;keypad show up on LCD, voltage on 7seg.
+	setb LEDRA.6
+	lcall clear7seg ;clear at the start
+	lcall turnoff_leds; clear leds
+	lcall Display_LCD ;be able to type on the lcd
+	lcall voltage_reading ;calculate the math/voltage
+	lcall voltage_reading_7seg ;display voltage on 7seg.
+ 	ljmp fsm_part
+ 	
+
+
+
+
+   
+fsm_part: 
+    ; --- Part 3: FSM / Button Logic --- 
+    jb reset, check_increment
+    lcall Wait50Ms
+    jb reset, check_increment
+    
+    mov state, #0
+    lcall Update_State_Display
+   
+wait_reset_release:
+    jnb reset, wait_reset_release
+    ljmp no_press   
+     
+check_increment:
+    jb BUTTON, no_press     
+    lcall Wait50ms          
+    jb BUTTON, no_press     
+    
+    inc state
+    mov a, state
+    cjne a, #7, skip_reset  
+    mov state, #0
+        
+skip_reset:
+    lcall Update_State_Display
+    
+wait_release:
+    jnb BUTTON, wait_release
+
+no_press:
+    lcall Wait50ms 
+    ljmp forever
+
+Update_State_Display: 
+    Set_Cursor(1, 1)
+    mov a, state
+    cjne a, #0, state1 
+    Send_Constant_String(#state0_msg)
+    ret
+state1:
+    cjne a, #1, state2
+    Send_Constant_String(#state1_msg)
+    ret
+state2:
+    cjne a, #2, state3
+    Send_Constant_String(#state2_msg)
+    ret
+state3:
+    cjne a, #3, state4
+    Send_Constant_String(#state3_msg)
+    ret
+state4:
+    cjne a, #4, state5
+    Send_Constant_String(#state4_msg)
+    ret
+state5:
+    cjne a, #5, state6
+    Send_Constant_String(#state5_msg)
+    ret
+state6:
+    Send_Constant_String(#state6_msg)
+    ret
+
+end
