@@ -1,0 +1,361 @@
+0000              1   ; 76E003 ADC test program: Reads channel 7 on P1.1, pin 14
+0000              2   ; This version uses the LM4040 voltage reference connected to pin 6 (P1.7/AIN0)
+0000              3   
+                  5   $LIST
+0000              7   
+0000              8   ;  N76E003 pinout:
+0000              9   ;                               -------
+0000             10   ;       PWM2/IC6/T0/AIN4/P0.5 -|1    20|- P0.4/AIN5/STADC/PWM3/IC3
+0000             11   ;               TXD/AIN3/P0.6 -|2    19|- P0.3/PWM5/IC5/AIN6
+0000             12   ;               RXD/AIN2/P0.7 -|3    18|- P0.2/ICPCK/OCDCK/RXD_1/[SCL]
+0000             13   ;                    RST/P2.0 -|4    17|- P0.1/PWM4/IC4/MISO
+0000             14   ;        INT0/OSCIN/AIN1/P3.0 -|5    16|- P0.0/PWM3/IC3/MOSI/T1
+0000             15   ;              INT1/AIN0/P1.7 -|6    15|- P1.0/PWM2/IC2/SPCLK
+0000             16   ;                         GND -|7    14|- P1.1/PWM1/IC1/AIN7/CLO
+0000             17   ;[SDA]/TXD_1/ICPDA/OCDDA/P1.6 -|8    13|- P1.2/PWM0/IC0
+0000             18   ;                         VDD -|9    12|- P1.3/SCL/[STADC]
+0000             19   ;            PWM5/IC7/SS/P1.5 -|10   11|- P1.4/SDA/FB/PWM1
+0000             20   ;                               -------
+0000             21   ;
+0000             22   
+0000             23   CLK                                EQU 16600000 ; Microcontroller system frequency in Hz
+0000             24   BAUD                       EQU 115200 ; Baud rate of UART in bps
+0000             25   TIMER1_RELOAD      EQU (0x100-(CLK/(16*BAUD)))
+0000             26   TIMER0_RELOAD_1MS EQU (0x10000-(CLK/1000))
+0000             27   
+0000             28   ORG 0x0000
+0000 020455      29            ljmp main
+0003             30   
+0003             31   ;           1234567890123456    <- This helps determine the location of the counter
+0003 5F5F5F5F    32   lineA:   db '____.__C AMBIENT', 0
+     2E5F5F43
+     20414D42
+     49454E54
+     00
+0014 5F5F5F5F    33   lineO:   db '____.__C OVEN   ', 0
+     2E5F5F43
+     204F5645
+     4E202020
+     00
+0025             34   
+0025             35   cseg
+0025             36   ; PINOUT
+0025             37   LCD_RS equ P1.3
+0025             38   LCD_E  equ P1.4
+0025             39   LCD_D4 equ P0.0
+0025             40   LCD_D5 equ P0.1
+0025             41   LCD_D6 equ P0.2
+0025             42   LCD_D7 equ P0.3
+0025             43   
+                 45   	$LIST
+00D9             47   
+00D9             48   ; These register definitions needed by 'math32.inc'
+0030             49   DSEG at 30H
+0030             50   x:            ds 4
+0034             51   y:            ds 4
+0038             52   bcd:          ds 5
+003D             53   ambient_temp: ds 4
+0041             54   VAL_LM4040:   ds 2
+0043             55   
+0000             56   BSEG           ; Bit Addressable Segment
+0000             57   mf:           dbit 1 ; <--- Add this line here
+0001             58   
+                546   $LIST
+                 60   $LIST
+0349             62   
+0349             63   Init_All:
+0349             64            ; Configure all the pins for biderectional I/O
+0349 75AC00      65            mov     P3M1, #0x00
+034C 75AD00      66            mov     P3M2, #0x00
+034F 75B300      67            mov     P1M1, #0x00
+0352 75B400      68            mov     P1M2, #0x00
+0355 75B100      69            mov     P0M1, #0x00
+0358 75B200      70            mov     P0M2, #0x00
+035B             71            
+035B 438E10      72            orl     CKCON, #0x10 ; CLK is the input for timer 1
+035E 438780      73            orl     PCON, #0x80 ; Bit SMOD=1, double baud rate
+0361 759852      74            mov     SCON, #0x52
+0364 53C4DF      75            anl     T3CON, #0b11011111
+0367 53890F      76            anl     TMOD, #0x0F ; Clear the configuration bits for timer 1
+036A 438920      77            orl     TMOD, #0x20 ; Timer 1 Mode 2
+036D 758DF7      78            mov     TH1, #TIMER1_RELOAD ; TH1=TIMER1_RELOAD;
+0370 D28E        79            setb TR1
+0372             80            
+0372             81            ; Using timer 0 for delay functions.  Initialize here:
+0372 C28C        82            clr     TR0 ; Stop timer 0
+0374 438E08      83            orl     CKCON,#0x08 ; CLK is the input for timer 0
+0377 5389F0      84            anl     TMOD,#0xF0 ; Clear the configuration bits for timer 0
+037A 438901      85            orl     TMOD,#0x01 ; Timer 0 in Mode 1: 16-bit timer
+037D             86            
+037D             87            ; Initialize the pins used by the ADC (P1.1, P1.7) as input.
+037D 43B382      88            orl     P1M1, #0b10000010
+0380 53B47D      89            anl     P1M2, #0b01111101
+0383             90            ; Configure P0.4 (AIN5) as Input Only
+0383 43B110      91            orl P0M1, #0b00010000
+0386 53B2EF      92            anl P0M2, #0b11101111
+0389             93            ; Set P1.5 as input 10
+0389 43B320      94            orl P1M1, #0b00100000
+038C 53B4DF      95            anl P1M2, #0b11011111
+038F             96            
+038F             97            ; Initialize and start the ADC:
+038F 53E8F0      98            anl ADCCON0, #0xF0
+0392 43E807      99            orl ADCCON0, #0x07 ; Select channel 7
+0395            100            ; AINDIDS select if some pins are analog inputs or digital I/O:
+0395 75F600     101            mov AINDIDS, #0x00 ; Disable all analog inputs
+0398 43F6A1     102            orl AINDIDS, #0b10100001 ; Bit 0 (AIN0), Bit 5 (AIN5), Bit 7 (AIN7)
+039B 43E101     103            orl ADCCON1, #0x01 ; Enable ADC
+039E            104            
+039E 22         105            ret
+039F            106            
+039F            107   wait_1ms:
+039F C28C       108            clr     TR0 ; Stop timer 0
+03A1 C28D       109            clr     TF0 ; Clear overflow flag
+03A3 758CBF     110            mov     TH0, #high(TIMER0_RELOAD_1MS)
+03A6 758A28     111            mov     TL0,#low(TIMER0_RELOAD_1MS)
+03A9 D28C       112            setb TR0
+03AB 308DFD     113            jnb     TF0, $ ; Wait for overflow
+03AE 22         114            ret
+03AF            115   
+03AF            116   ; Wait the number of miliseconds in R2
+03AF            117   waitms:
+03AF 12039F     118            lcall wait_1ms
+03B2 DAFB       119            djnz R2, waitms
+03B4 22         120            ret
+03B5            121   
+03B5            122   ; We can display a number any way we want.  In this case with six sig fig
+03B5            123   Display_formated_BCD_ambient:
+03B5 C0E0       124            push acc
+03B7 7401       124            mov a, #1
+03B9 14         124            dec a
+03BA 1200BE     124            lcall ?Set_Cursor_1 ; Select column and row
+03BD D0E0       124            pop acc
+03BF C000       125            push ar0
+03C1 A83A       125            mov r0, bcd+2
+03C3 1200C3     125            lcall ?Display_BCD
+03C6 D000       125            pop ar0
+03C8 C000       126            push ar0
+03CA A839       126            mov r0, bcd+1
+03CC 1200C3     126            lcall ?Display_BCD
+03CF D000       126            pop ar0
+03D1 C0E0       127            push acc
+03D3 742E       127            mov a, #'.'
+03D5 120074     127            lcall ?WriteData
+03D8 D0E0       127            pop acc
+03DA C000       128            push ar0
+03DC A838       128            mov r0, bcd+0
+03DE 1200C3     128            lcall ?Display_BCD
+03E1 D000       128            pop ar0
+03E3 22         129            ret
+03E4            130            
+03E4            131   Display_formated_BCD_oven:
+03E4 C0E0       132            push acc
+03E6 7401       132            mov a, #1
+03E8 14         132            dec a
+03E9 1200BC     132            lcall ?Set_Cursor_2 ; Select column and row
+03EC D0E0       132            pop acc
+03EE C000       133            push ar0
+03F0 A83A       133            mov r0, bcd+2
+03F2 1200C3     133            lcall ?Display_BCD
+03F5 D000       133            pop ar0
+03F7 C000       134            push ar0
+03F9 A839       134            mov r0, bcd+1
+03FB 1200C3     134            lcall ?Display_BCD
+03FE D000       134            pop ar0
+0400 C0E0       135            push acc
+0402 742E       135            mov a, #'.'
+0404 120074     135            lcall ?WriteData
+0407 D0E0       135            pop acc
+0409 C000       136            push ar0
+040B A838       136            mov r0, bcd+0
+040D 1200C3     136            lcall ?Display_BCD
+0410 D000       136            pop ar0
+0412 22         137            ret
+0413            138   
+0413            139   putchar:
+0413 3099FD     140            jnb TI, putchar
+0416 C299       141            clr TI
+0418 F599       142            mov SBUF, a
+041A 22         143            ret
+041B            144   
+041B            145   Send_newLine:
+041B 740D       146            mov a, #0x0D ; 13 in hex
+041D 120413     147            lcall putchar
+0420 740A       148            mov a, #0x0A ; 10 in hex
+0422 120413     149            lcall putchar
+0425 22         150            ret
+0426            151            
+0426            152   putchar_bcd:
+0426 C0E0       153            push acc
+0428 C4         154            swap a
+0429 540F       155            anl a, #0x0f
+042B 2430       156            add a, #'0'
+042D 120413     157            lcall putchar
+0430 D0E0       158            pop acc
+0432 540F       159            anl a, #0x0f
+0434 2430       160            add a, #'0'
+0436 120413     161            lcall putchar
+0439 22         162            ret
+043A            163   
+043A            164   Read_ADC:
+043A C2EF       165            clr ADCF
+043C D2EE       166            setb ADCS ;  ADC start trigger signal
+043E 30EFFD     167            jnb ADCF, $ ; Wait for conversion complete
+0441            168            
+0441            169            ; Read the ADC result and store in [R1, R0]
+0441 E5C2       170            mov a, ADCRL
+0443 540F       171            anl a, #0x0f
+0445 F8         172            mov R0, a
+0446 E5C3       173            mov a, ADCRH
+0448 C4         174            swap a
+0449 C0E0       175            push acc
+044B 540F       176            anl a, #0x0f
+044D F9         177            mov R1, a
+044E D0E0       178            pop acc
+0450 54F0       179            anl a, #0xf0
+0452 48         180            orl a, R0
+0453 F8         181            mov R0, A
+0454 22         182            ret
+0455            183   
+0455            184   main:
+0455 75817F     185            mov sp, #0x7f
+0458 120349     186            lcall Init_All
+045B 12007E     187            lcall LCD_4BIT
+045E            188            
+045E            189            ; initial messages in LCD
+045E C0E0       190            push acc
+0460 7401       190            mov a, #1
+0462 14         190            dec a
+0463 1200BE     190            lcall ?Set_Cursor_1 ; Select column and row
+0466 D0E0       190            pop acc
+0468 C083       191            push dph
+046A C082       191            push dpl
+046C C0E0       191            push acc
+046E 900003     191            mov dptr, #lineA
+0471 1200B1     191            lcall ?Send_Constant_String
+0474 D0E0       191            pop acc
+0476 D082       191            pop dpl
+0478 D083       191            pop dph
+047A C0E0       192            push acc
+047C 7401       192            mov a, #1
+047E 14         192            dec a
+047F 1200BC     192            lcall ?Set_Cursor_2 ; Select column and row
+0482 D0E0       192            pop acc
+0484 C083       193            push dph
+0486 C082       193            push dpl
+0488 C0E0       193            push acc
+048A 900014     193            mov dptr, #lineO
+048D 1200B1     193            lcall ?Send_Constant_String
+0490 D0E0       193            pop acc
+0492 D082       193            pop dpl
+0494 D083       193            pop dph
+0496            194            
+0496            195   Forever:
+0496            196       ; --- STEP 1: Read LM4040 Reference (AIN0) ---
+0496 53E8F0     197       anl ADCCON0, #0xF0
+0499 43E800     198       orl ADCCON0, #0x00 
+049C 12043A     199       lcall Read_ADC
+049F 8841       200       mov VAL_LM4040+0, R0
+04A1 8942       201       mov VAL_LM4040+1, R1
+04A3            202   
+04A3            203       ; --- STEP 2: Calculate Ambient Temperature (LM335 on AIN7) ---
+04A3 53E8F0     204       anl ADCCON0, #0xF0
+04A6 43E807     205       orl ADCCON0, #0x07
+04A9 12043A     206       lcall Read_ADC
+04AC            207       
+04AC 8830       208       mov x+0, R0
+04AE 8931       209       mov x+1, R1
+04B0 753200     210       mov x+2, #0
+04B3 753300     211       mov x+3, #0
+04B6            212       
+04B6            213       ; Convert ADC counts to Kelvin * 100
+04B6            214       ; Formula: (ADC_7 * 41040) / ADC_0
+04B6 753450     215            mov y+0, #low (41040 % 0x10000) 
+04B9 7535A0     215            mov y+1, #high(41040 % 0x10000) 
+04BC 753600     215            mov y+2, #low (41040 / 0x10000) 
+04BF 753700     215            mov y+3, #high(41040 / 0x10000)  
+04C2 120253     216       lcall mul32
+04C5 854134     217       mov y+0, VAL_LM4040+0
+04C8 854235     218       mov y+1, VAL_LM4040+1
+04CB 753600     219       mov y+2, #0
+04CE 753700     220       mov y+3, #0
+04D1 1202E0     221       lcall div32
+04D4            222       
+04D4            223       ; Convert Kelvin to Celsius (subtract 2.73)
+04D4 7534A4     224            mov y+0, #low (27300 % 0x10000) 
+04D7 75356A     224            mov y+1, #high(27300 % 0x10000) 
+04DA 753600     224            mov y+2, #low (27300 / 0x10000) 
+04DD 753700     224            mov y+3, #high(27300 / 0x10000) 
+04E0 1201BF     225       lcall sub32
+04E3            226       
+04E3            227       ; Store for Cold Junction Compensation (0.01C units)
+04E3 85303D     228       mov ambient_temp+0, x+0
+04E6 85313E     229       mov ambient_temp+1, x+1
+04E9 85323F     230       mov ambient_temp+2, x+2
+04EC 853340     231       mov ambient_temp+3, x+3
+04EF            232   
+04EF            233       ; Display Ambient on Line 1
+04EF 1200D9     234       lcall hex2bcd
+04F2 1203B5     235       lcall Display_formated_BCD_ambient
+04F5            236   
+04F5            237       ; --- STEP 3: Calculate Oven Temperature (AIN5) ---
+04F5 53E8F0     238       anl ADCCON0, #0xF0
+04F8 43E805     239       orl ADCCON0, #0x05
+04FB 12043A     240       lcall Read_ADC
+04FE            241       
+04FE 8830       242       mov x+0, R0
+0500 8931       243       mov x+1, R1
+0502 753200     244       mov x+2, #0
+0505 753300     245       mov x+3, #0
+0508            246       
+0508            247       ; Convert ADC counts to millivolts (mV) at Op-Amp output
+0508 753450     248            mov y+0, #low (41040 % 0x10000) 
+050B 7535A0     248            mov y+1, #high(41040 % 0x10000) 
+050E 753600     248            mov y+2, #low (41040 / 0x10000) 
+0511 753700     248            mov y+3, #high(41040 / 0x10000) 
+0514 120253     249       lcall mul32
+0517 854134     250       mov y+0, VAL_LM4040+0
+051A 854235     251       mov y+1, VAL_LM4040+1
+051D 753600     252       mov y+2, #0
+0520 753700     253       mov y+3, #0
+0523 1202E0     254       lcall div32
+0526            255       
+0526            256       ; Convert mV to Temperature difference (0.01C resolution)
+0526            257       ; Since 1C = 12.3mV (41uV * 300 Gain), we use: (mV * 1000) / 123
+0526 7534E8     258            mov y+0, #low (1000 % 0x10000) 
+0529 753503     258            mov y+1, #high(1000 % 0x10000) 
+052C 753600     258            mov y+2, #low (1000 / 0x10000) 
+052F 753700     258            mov y+3, #high(1000 / 0x10000) 
+0532 120253     259       lcall mul32
+0535 75347B     260            mov y+0, #low (123 % 0x10000) 
+0538 753500     260            mov y+1, #high(123 % 0x10000) 
+053B 753600     260            mov y+2, #low (123 / 0x10000) 
+053E 753700     260            mov y+3, #high(123 / 0x10000) 
+0541 1202E0     261       lcall div32
+0544            262   
+0544            263       ; Add Ambient (Cold Junction Compensation)
+0544 853D34     264       mov y+0, ambient_temp+0
+0547 853E35     265       mov y+1, ambient_temp+1
+054A 853F36     266       mov y+2, ambient_temp+2
+054D 854037     267       mov y+3, ambient_temp+3
+0550 12019E     268       lcall add32
+0553            269   
+0553            270       ; Display Oven on Line 2
+0553 1200D9     271       lcall hex2bcd
+0556 1203E4     272       lcall Display_formated_BCD_oven
+0559            273       
+0559            274       ; --- STEP 4: UART Output for Data Logging ---
+0559 E53A       275       mov a, bcd+2
+055B 120426     276       lcall putchar_bcd
+055E 742E       277       mov a, #'.'
+0560 120413     278       lcall putchar
+0563 E539       279       mov a, bcd+1
+0565 120426     280       lcall putchar_bcd
+0568 12041B     281       lcall Send_newLine
+056B            282   
+056B            283       ; --- Delay 500ms ---
+056B 7AFA       284       mov R2, #250
+056D 1203AF     285       lcall waitms
+0570 7AFA       286       mov R2, #250
+0572 1203AF     287       lcall waitms
+0575 020496     288       ljmp Forever
+0578            289   EN
