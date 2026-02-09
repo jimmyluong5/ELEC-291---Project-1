@@ -104,6 +104,16 @@ state6_msg: db 'State: 6 ', 0
 test_msg: db 'test', 0
 clear_msg: db '                       ', 0
 
+;                     1234567890123456    <- This helps determine the location of the counter
+main_menu1:       db 'Rm Temp(C):     ', 0
+main_menu2:       db 'Ov Temp(C):   ', 0
+value_message1:   db 'Soak Temp(C)=   ', 0
+value_message2:   db 'Soak Time(s)=   ', 0
+value_message3:   db 'Rflw Temp(C)=   ', 0
+value_message4:   db 'Rflw Time(s)=   ', 0
+
+
+
 
 
 
@@ -129,12 +139,13 @@ Display_Voltage_7seg:
 	swap a ;swapping higher and lower 4 bits with each other?
 	anl a, #0FH ;logic and 
 	movc a, @a+dptr
-	anl a, #0x7f ; Turn on decimal point
+	
 	mov HEX3, a
 	
 	mov a, bcd+1
 	anl a, #0FH
 	movc a, @a+dptr
+	anl a, #0x7f ; Turn on decimal point
 	mov HEX2, a
 
 	mov a, bcd+0
@@ -218,9 +229,43 @@ Display_Voltage_Serial:
 	mov a, #'\r'
 	lcall putchar
 	mov a, #'\n'
-	lcall putchar
-	
-	ret
+	lcall putchar	
+ret
+
+Display_Room_Temp:
+	Set_Cursor(1, 12)
+	Load_y(7315)
+	lcall sub32
+	lcall hex2bcd
+	Display_BCD(bcd+1)
+	Display_char(#'.')
+	Display_BCD(bcd+0)
+ret
+
+
+Display_Oven_Temp:
+	Set_Cursor(2, 13)
+	Load_y(1000000)
+	lcall mul32
+	Load_y(41)
+	lcall div32
+	Load_y(302781)
+	lcall div32 ;still need to add rm temp
+	;Load_y(rm_temp)
+	;lcall add32
+	; scaling function
+	Load_y(12143)
+	lcall mul32
+	Load_y(284120) ; rougly room temp + 8 degrees ish
+	lcall add32
+	Load_y(10000)
+	lcall div32
+	lcall hex2bcd
+	Display_BCD(bcd+2)
+	Display_BCD(bcd+1)
+	Display_BCD(bcd+0)
+ret
+
 
 Initial_Message:  db 'Voltmeter test', 0
 
@@ -247,7 +292,7 @@ mycode:
 
 forever:
 	mov a, SWA ; The first three switches select the channel to read
-	anl a, #0x07
+	anl a, #0x01
 	orl a, #0x08 ;(start bit)
 	mov ADC_C, a
 	setb LEDRA.0
@@ -257,19 +302,14 @@ forever:
 	mov x+1, ADC_H
 	mov x+0, ADC_L
 	
-	; Convert to voltage by multiplying by 5.000 and dividing by 4096
-	Load_y(5000)
+	; Convert to voltage by multiplying by 3.3000 (for de10) and dividing by 4096
+	Load_y(3300)
 	lcall mul32
 	Load_y(4096)
-	lcall div32
+	lcall div32	
 	
-	
-	
-	
-	
-	lcall hex2bcd
 	lcall Display_Voltage_7seg
-	lcall Display_Voltage_LCD
+	lcall Display_Room_Temp
 	lcall Display_Voltage_Serial
 
 
@@ -310,11 +350,11 @@ Update_State_Display:
     Set_Cursor(1, 1)
     mov a, state
     cjne a, #0, state1 
-    Send_Constant_String(#state0_msg)
+    Send_Constant_String(#main_menu1)
     ret
 state1:
     cjne a, #1, state2
-    Send_Constant_String(#state1_msg)
+    Send_Constant_String(#main_menu2)
     ret
 state2:
     cjne a, #2, state3
