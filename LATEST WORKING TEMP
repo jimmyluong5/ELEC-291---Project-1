@@ -198,8 +198,10 @@ lcall div32
 Load_y(302781)
 lcall div32 ;still need to add rm temp
 ; scaling function
-Load_y(12143)
+Load_y(12158) ; 12143 should also work, probably.
 lcall mul32
+Load_y(8225)
+lcall add32
 Load_y(10000)
 lcall div32
 
