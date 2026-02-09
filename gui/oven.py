@@ -39,7 +39,7 @@ class TextRedirector:
 ctypes.windll.shcore.SetProcessDpiAwareness(1) # Use actual screen instead of scaled
 root = Tk()
 root.resizable(False, False)
-root.iconbitmap('litovenicon.ico')
+root.iconbitmap('gui/litovenicon.ico')
 root.title('Reflow Oven GUI')
 screen_width = root.winfo_screenwidth()
 screen_height = root.winfo_screenheight()
@@ -49,7 +49,7 @@ default_font.configure(family='xkcd script', size=15)
 root.option_add('*Font', default_font)
 
 # background wallpaper
-image = Image.open('crumpledpaper_bg.jpg')
+image = Image.open('gui/crumpledpaper_bg.jpg')
 bg_img = ImageTk.PhotoImage(image.resize((screen_width, screen_height), Image.Resampling.LANCZOS))
 bg_label = Label(root, image=bg_img)
 bg_label.place(x=0, y=0, relwidth=1, relheight=1)
@@ -220,7 +220,7 @@ def pop_csv():
             
             subject = 'Reflow Oven CSV File'
             body = "Here's a copy of your most recent reflow oven data points as a csv\nHave a good day!\n- Yours truly, OvenAI"
-            attachments = ['serialdata.csv']
+            attachments = ['gui/serialdata.csv']
             send_oven_email(subject, body, attachments)
             subject, body, attachments = None, None, None
 
@@ -238,7 +238,7 @@ def pop_img():
             
             subject = 'Reflow Oven PNG Image'
             body = "Here's a copy of your most recent reflow oven plot as a png\nHave a good day!\n- Yours truly, OvenAI"
-            attachments = ['reflowOvenPlot.png']
+            attachments = ['gui/reflowOvenPlot.png']
             send_oven_email(subject, body, attachments)
             subject, body, attachments = None, None, None
 
