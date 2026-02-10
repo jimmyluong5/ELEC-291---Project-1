@@ -398,6 +398,23 @@ after_error_check:
 lcall Do_ExtraBeeps
 
 
+jb  error_flag, chk_err_done_main
+    sjmp continue_main
+
+chk_err_done_main:
+    mov a, beep_count
+    jnz continue_main
+
+    ; done beeping
+    clr error_flag
+    mov state, #0
+    mov prev_state, #0
+    lcall Update_State_Display
+
+continue_main:
+    ; now continue with keypad / display / fsm
+
+
     ; keypad
     lcall Keypad
     jnc check_mode
@@ -426,22 +443,28 @@ mode_LCD:
     ljmp fsm_part
 
 fsm_part:
-    ; reset -> state 0
-    jb reset, check_increment
-    lcall Wait50ms
-    jb reset, check_increment
-    
-    ;clr  error_flag       ; clear error mode
-    ;mov  beep_count, #0   ; cancel queued beeps
-    ;clr  TR0              ; stop timer tone (if it was on)
-    ;clr  SPEAKER          ; speaker low
-    
-    mov state, #0
-    ;mov prev_state, #0
+    ; ---------------- RESET BUTTON (one-shot) ----------------
+    jb   reset, check_increment     ; not pressed? skip
+
+    lcall Wait50ms                  ; debounce
+    jb   reset, check_increment     ; false trigger? skip
+
+    ; ---- REAL RESET ACTION ----
+    clr  error_flag                 ; exit error mode
+    mov  beep_count, #0             ; cancel remaining beeps
+    clr  TR0                        ; stop speaker timer
+    clr  SPEAKER                    ; silence speaker
+
+    mov  state, #0
+    mov  prev_state, #0
+    lcall LCD_4bit
     lcall Update_State_Display
+
 wait_reset_release:
-    jnb reset, wait_reset_release
-    ljmp no_press
+    jnb  reset, wait_reset_release  ; wait until button released
+
+    sjmp no_press                   ; return to main loop cleanly
+
 
 check_increment:
     jb BUTTON, no_press
@@ -472,7 +495,7 @@ STATE_CHANGED:
     mov prev_state, a
     
     jb  error_flag, done_beep_load
-
+    
 
     ; always 1 beep on state change
     lcall Beep_Once
