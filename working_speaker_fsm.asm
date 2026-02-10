@@ -125,9 +125,11 @@ Timer0_ISR:
 Loud_Beep_Once:
     setb TR0              ; start tone
     lcall Wait50ms        ; ON time (adjust)
+    lcall Wait50ms
     clr  TR0              ; stop tone
     clr  SPEAKER
     lcall Wait50ms        ; gap between beeps (adjust)
+    lcall Wait50ms
     ret
 
 
@@ -151,6 +153,7 @@ Beep_Once:
     jb  ringing_flag, BO_done
 
     setb TR0
+    lcall wait50ms
     lcall Wait50ms       ; beep length (change to Wait25ms if you want shorter)
     clr  TR0
     clr  SPEAKER
@@ -380,7 +383,7 @@ forever:
 ; ---- Error button test (P3.7) ----
     jb  ERROR_BTN, after_error_check     ; if high, not pressed
     lcall Wait50ms
-    jb  ERROR_BTN, after_error_check     ; still not pressed? ignore
+    jb  ERROR_BTN, after_error_check     ; still not pressed? ignore         
 
     ; pressed -> latch error
     setb error_flag
@@ -427,7 +430,14 @@ fsm_part:
     jb reset, check_increment
     lcall Wait50ms
     jb reset, check_increment
+    
+    ;clr  error_flag       ; clear error mode
+    ;mov  beep_count, #0   ; cancel queued beeps
+    ;clr  TR0              ; stop timer tone (if it was on)
+    ;clr  SPEAKER          ; speaker low
+    
     mov state, #0
+    ;mov prev_state, #0
     lcall Update_State_Display
 wait_reset_release:
     jnb reset, wait_reset_release
