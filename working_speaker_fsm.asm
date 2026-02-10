@@ -20,6 +20,7 @@ BSEG
 mf:     dbit 1
 alarm_en_flag:     dbit 1 ; Alarm enabled flag
 ringing_flag:      dbit 1 ; Alarm currently ringing flag
+error_flag:        dbit 1
 
 
 ; Constants
@@ -31,6 +32,8 @@ T2LOAD  EQU 65536-(FREQ/(32*BAUD))
 BUTTON  EQU KEY.1  ; KEY1 for state transition 
 reset   equ P1.3   ; this key will be for resetting to state 0 
 SPEAKER equ P1.5
+ERROR_BTN  EQU P3.7   ; active-low pushbutton (typical)
+
 
 ; Keypad Pins
 ROW1 EQU P1.2
@@ -82,6 +85,7 @@ state3_msg: db 'State: 3 ', 0
 state4_msg: db 'State: 4', 0
 state5_msg: db 'State: 5', 0
 state6_msg: db 'State: 6 ', 0
+state_e_msg: db 'ERROR FIX NOW', 0
 test_msg: db 'test', 0
 clear_msg: db '                       ', 0
 
@@ -143,7 +147,7 @@ ret
 ; Short beep using the SAME loud timer tone:
 ; (Turn TR0 on briefly, then off)
 Beep_Once:
-    ; if alarm already ringing, don’t interrupt it
+    ; if alarm already ringing, donâ€™t interrupt it
     jb  ringing_flag, BO_done
 
     setb TR0
@@ -319,16 +323,25 @@ voltage_reading:
 ret
 
 
+
+
 ; --- Main Program ---
 
 mycode:
     mov SP, #7FH
     mov P0MOD, #10101111b
     mov P1MOD, #10101010b
-    anl P1MOD, #11110111b   ; <-- clear bit3 => P1.3 becomes INPUT
-    setb P1.3               ; optional: leave it high / pull-up style behavior
+
+; keep P1.3 as input (you already do this)
+anl P1MOD, #11110111b     ; clear bit3
 
 
+    setb P1.4   ; weak pull-up behavior (if supported by your setup)
+   
+
+
+
+    clr error_flag
     clr SPEAKER
     clr alarm_en_flag
     clr ringing_flag
@@ -340,6 +353,14 @@ mycode:
     setb alarm_en_flag
 
     lcall Configure_Keypad_Pins
+    
+   anl P3MOD, #01111111b
+setb P3.7
+
+
+    
+
+
     lcall turnoff_leds
     lcall InitSerialPort
     lcall LCD_4BIT
@@ -354,14 +375,34 @@ mycode:
     mov sw_state, #0
 
 forever:
-    ; play any queued extra beeps (non-blocking-ish, one per loop)
-    lcall Do_ExtraBeeps
+
+
+; ---- Error button test (P3.7) ----
+    jb  ERROR_BTN, after_error_check     ; if high, not pressed
+    lcall Wait50ms
+    jb  ERROR_BTN, after_error_check     ; still not pressed? ignore
+
+    ; pressed -> latch error
+    setb error_flag
+    mov  beep_count, #10                 ; 10 loud beeps
+    lcall Loud_Beep_Once
+    lcall Update_State_Display
+    
+wait_err_release:
+    jnb ERROR_BTN, wait_err_release
+
+after_error_check:
+lcall Do_ExtraBeeps
+
 
     ; keypad
     lcall Keypad
     jnc check_mode
     lcall Shift_Digits_Left
     lcall Beep_Once
+    
+    
+
 
 check_mode:
     jb SWA.6, mode_LCD
@@ -413,9 +454,15 @@ wait_release:
     mov a, state
     cjne a, prev_state, STATE_CHANGED
     sjmp no_press
+    
+    
 
-  STATE_CHANGED:
+
+STATE_CHANGED:
     mov prev_state, a
+    
+    jb  error_flag, done_beep_load
+
 
     ; always 1 beep on state change
     lcall Beep_Once
@@ -430,14 +477,18 @@ wait_release:
 
 chk_state5:
     ; state 5 ? total 5 beeps (same pattern)
-    cjne a, #5, chk_state6
+    cjne a, #5, chk_state_error
     mov beep_count, #4
     sjmp done_beep_load
 
-chk_state6:
+chk_state_error:
     ; state 6 ? total 10 beeps
-    cjne a, #6, done_beep_load
-    mov beep_count, #9
+jb  error_flag, set_10beeps
+sjmp done_beep_load
+
+set_10beeps:
+mov beep_count, #9
+
 
 done_beep_load:
     sjmp no_press
@@ -446,12 +497,25 @@ done_beep_load:
 no_press:
     lcall Wait50ms
     ljmp forever
+    
+    
+ 
 
 ; ----------------------------
 ; LCD STATE DISPLAY
 ; ----------------------------
 Update_State_Display:
     Set_Cursor(1, 1)
+    
+jb  error_flag, show_error   ; short jump to a nearby label
+sjmp normal_state       ; skip error if flag = 0
+
+show_error:
+    ljmp s_error             ; long jump works anywhere
+
+normal_state:
+
+    
     mov a, state
     cjne a, #0, s1
     Send_Constant_String(#state0_msg)
@@ -474,5 +538,9 @@ s5: cjne a, #5, s6
 s6:
     Send_Constant_String(#state6_msg)
     ret
+
+s_error:
+Send_Constant_String(#state_e_msg)
+ret
 
 END
