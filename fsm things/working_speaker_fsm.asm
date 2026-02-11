@@ -2,6 +2,9 @@ $MODMAX10
 
 CSEG at 0
     ljmp mycode
+    
+    org 000Bh
+    ljmp Timer0_ISR
 
 DSEG at 30h
 x:      ds  4
@@ -9,9 +12,16 @@ y:      ds  4
 bcd:    ds  5 ; Voltmeter BCD buffer 
 bcd1:   ds  5 ; Keypad BCD buffer
 state:  ds  1 ; Variable to keep track of current state 
+sw_state: ds 1 ; state for the switch 
+prev_state: ds 1   ; stores last state to detect transitions
+beep_count: ds 1
 
 BSEG
 mf:     dbit 1
+alarm_en_flag:     dbit 1 ; Alarm enabled flag
+ringing_flag:      dbit 1 ; Alarm currently ringing flag
+error_flag:        dbit 1
+
 
 ; Constants
 FREQ    EQU 33333333
@@ -21,6 +31,9 @@ T2LOAD  EQU 65536-(FREQ/(32*BAUD))
 ; Hardware mapping for DE10-Lite
 BUTTON  EQU KEY.1  ; KEY1 for state transition 
 reset   equ P1.3   ; this key will be for resetting to state 0 
+SPEAKER equ P1.5
+ERROR_BTN  EQU P3.7   ; active-low pushbutton (typical)
+
 
 ; Keypad Pins
 ROW1 EQU P1.2
@@ -31,6 +44,22 @@ COL1 EQU P2.2
 COL2 EQU P2.4
 COL3 EQU P2.6
 COL4 EQU P3.0
+
+
+;switches used
+sw0 equ SWA.0 ;this will be used to display the temperature reading 
+sw1 equ SWA.1 ;used to display the voltage
+sw2 equ SWA.2 ;used to display the timer
+;reading an individual switch
+;jb sw0, switch_is_up ;jump to this label when the switch is high
+;jnb sw0, switch_is_down ;jump to this label when the switch is low
+
+;reading multiple switches at the same time
+;mov a, SWA ;moving the switch values from the SWA register into the accumulator
+;anl a, #00001111b ;only read the first 4 switch values only. (SW0 to SW4)
+
+ 
+
 
 $include(math32.asm)
 
@@ -44,6 +73,8 @@ LCD_D7 equ P0.1
 
 $NOLIST
 $include(LCD_4bit_DE10Lite_no_RW1.inc)
+$include(keyboard.inc)
+$include(keypad_to_LCD.inc)
 $LIST
 
 ; Strings for the FSM 
@@ -54,47 +85,91 @@ state3_msg: db 'State: 3 ', 0
 state4_msg: db 'State: 4', 0
 state5_msg: db 'State: 5', 0
 state6_msg: db 'State: 6 ', 0
+state_e_msg: db 'ERROR FIX NOW', 0
 test_msg: db 'test', 0
-myLUT:
-    DB 0xC0, 0xF9, 0xA4, 0xB0, 0x99        ; 0 TO 4 
-    DB 0x92, 0x82, 0xF8, 0x80, 0x90        ; 4 TO 9 
-    DB 0x88, 0x83, 0xC6, 0xA1, 0x86, 0x8E  ; A to F 
+clear_msg: db '                       ', 0
 
-; --- Macros from Keypad File ---
-showBCD MAC
-    mov A, %0
-    anl a, #0fh
-    movc A, @A+dptr
-    mov %1, A
-    mov A, %0
-    swap a
-    anl a, #0fh
-    movc A, @A+dptr
-    mov %2, A
-ENDMAC
 
-MYRLC MAC
-    mov a, %0
-    rlc a
-    mov %0, a
-ENDMAC
-
-MYRRC MAC
-    mov a, %0
-    rrc a
-    mov %0, a
-ENDMAC
-
-CHECK_COLUMN MAC
-    jb %0, CHECK_COL_%M
-    mov R7, %1
-    jnb %0, $ 
-    setb c
-    ret
-CHECK_COL_%M:
-ENDMAC
 
 ; --- Integrated Subroutines ---
+
+
+T0_RATE  EQU 4096
+T0_RELOAD EQU (65536-(FREQ/(12*T0_RATE)))
+
+
+Timer0_Init:
+    mov a, TMOD
+    anl a, #0F0h
+    orl a, #01h          ; Timer0 mode 1 (16-bit)
+    mov TMOD, a
+
+    mov TH0, #high(T0_RELOAD)
+    mov TL0, #low(T0_RELOAD)
+
+    setb ET0             ; enable Timer0 interrupt
+    clr  TR0             ; OFF by default
+    ret
+
+Timer0_ISR:
+    mov TH0, #high(T0_RELOAD)
+    mov TL0, #low(T0_RELOAD)
+    cpl SPEAKER
+    reti
+    
+    
+    
+;-----------------------------------------
+; Loud_Beep_Once: uses Timer0 tone for a short beep
+;-----------------------------------------
+Loud_Beep_Once:
+    setb TR0              ; start tone
+    lcall Wait50ms        ; ON time (adjust)
+    lcall Wait50ms
+    clr  TR0              ; stop tone
+    clr  SPEAKER
+    lcall Wait50ms        ; gap between beeps (adjust)
+    lcall Wait50ms
+    ret
+
+
+
+Alarm_On:
+setb ringing_flag
+setb TR0
+ret
+
+Alarm_Off:
+clr ringing_flag
+clr TR0
+clr SPEAKER
+ret
+
+
+; Short beep using the SAME loud timer tone:
+; (Turn TR0 on briefly, then off)
+Beep_Once:
+    ; if alarm already ringing, don’t interrupt it
+    jb  ringing_flag, BO_done
+
+    setb TR0
+    lcall wait50ms
+    lcall Wait50ms       ; beep length (change to Wait25ms if you want shorter)
+    clr  TR0
+    clr  SPEAKER
+BO_done:
+    ret
+
+Do_ExtraBeeps:
+    mov a, beep_count
+    jz  DEB_done
+    lcall Loud_Beep_Once
+    dec beep_count
+DEB_done:
+    ret
+
+
+
 
 InitSerialPort: 
     clr TR2
@@ -131,8 +206,8 @@ Display_Voltage_LCD:
     lcall ?WriteData
     mov a, bcd+1
     swap a
-    anl a, #0FH
-    orl a, #'0'
+    anl a, #0FH ;ensures we have a number between 0-9
+    orl a, #'0' ;because 0FH = 0000 1111
     lcall ?WriteData
     mov a, #'.'
     lcall ?WriteData
@@ -151,193 +226,78 @@ Display_Voltage_LCD:
     lcall ?WriteData
     ret
 
-Configure_Keypad_Pins:
-    orl P1MOD, #0b_01010100 
-    orl P2MOD, #0b_00000001 
-    anl P2MOD, #0b_10101011 
-    anl P3MOD, #0b_11111110 
-    ret
+clear7seg:
+	mov HEX0, #0FFH
+	mov HEX1, #0FFH
+	MOV HEX2, #0FFH
+	MOV HEX3, #0FFH
+	MOV HEX4, #0FFH
+	MOV HEX5, #0FFH
+ret
 
-Keypad:
-    jb KEY.1, keypad_L0
-    lcall Wait25ms 
-    jb KEY.1, keypad_L0
-    jnb KEY.1, $ 
-    lcall Shift_Digits_Right
-    clr c
-    ret
-keypad_L0:
-    clr ROW1
-    clr ROW2
-    clr ROW3
-    clr ROW4
-    mov c, COL1
-    anl c, COL2
-    anl c, COL3
-    anl c, COL4
-    jnc Keypad_Debounce
-    clr c
-    ret
-Keypad_Debounce:
-    lcall Wait25ms 
-    mov c, COL1
-    anl c, COL2
-    anl c, COL3
-    anl c, COL4
-    jnc Keypad_Key_Code
-    clr c
-    ret
-Keypad_Key_Code:    
-    setb ROW1
-    setb ROW2
-    setb ROW3
-    setb ROW4
-    jnb SWA.0, keypad_default
-    ljmp keypad_90deg
-keypad_default: 
-	nop
-	nop
-    clr ROW1
-    CHECK_COLUMN(COL1, #07H)
-    CHECK_COLUMN(COL2, #08H)
-    CHECK_COLUMN(COL3, #09H)
-    CHECK_COLUMN(COL4, #0AH)
-    setb ROW1
-    nop
-    nop
-    clr ROW2
-    CHECK_COLUMN(COL1, #04H)
-    CHECK_COLUMN(COL2, #05H)
-    CHECK_COLUMN(COL3, #06H)
-    CHECK_COLUMN(COL4, #0BH)
-    setb ROW2
-    clr ROW3
-    CHECK_COLUMN(COL1, #01H)
-    CHECK_COLUMN(COL2, #02H)
-    CHECK_COLUMN(COL3, #03H)
-    CHECK_COLUMN(COL4, #0CH)
-    setb ROW3
-    clr ROW4
-    CHECK_COLUMN(COL1, #0EH)
-    CHECK_COLUMN(COL2, #00H)
-    CHECK_COLUMN(COL3, #0FH)
-    CHECK_COLUMN(COL4, #0DH)
-    setb ROW4
-    clr c
-    ret
-keypad_90deg:
-    clr ROW1
-    CHECK_COLUMN(COL1, #0AH)
-    CHECK_COLUMN(COL2, #0BH)
-    CHECK_COLUMN(COL3, #0CH)
-    CHECK_COLUMN(COL4, #0DH)
-    setb ROW1
-    clr ROW2
-    CHECK_COLUMN(COL1, #03H)
-    CHECK_COLUMN(COL2, #06H)
-    CHECK_COLUMN(COL3, #09H)
-    CHECK_COLUMN(COL4, #0FH)
-    setb ROW2
-    clr ROW3
-    CHECK_COLUMN(COL1, #02H)
-    CHECK_COLUMN(COL2, #05H)
-    CHECK_COLUMN(COL3, #08H)
-    CHECK_COLUMN(COL4, #00H)
-    setb ROW3
-    clr ROW4
-    CHECK_COLUMN(COL1, #01H)
-    CHECK_COLUMN(COL2, #04H)
-    CHECK_COLUMN(COL3, #07H)
-    CHECK_COLUMN(COL4, #0EH)
-    setb ROW4
-    clr c
-    ret
+turnoff_leds:
+	clr LEDRA.0
+	clr LEDRA.1
+	clr LEDRA.2
+	clr LEDRA.3
+	clr LEDRA.4
+	clr LEDRA.5
+	clr LEDRA.6
+	clr LEDRA.7
 
-Display:
-    mov dptr, #myLUT
-    mov a, bcd1+3
-    orl a, bcd1+4
-    jz Display_L1
-    setb LEDRA.7 
-    sjmp Display_L2
-Display_L1:
-    clr LEDRA.7
-Display_L2:
-    jnb key.3, Display_high_digits
-    showBCD(bcd1+0, HEX0, HEX1)
-    showBCD(bcd1+1, HEX2, HEX3)
-    showBCD(bcd1+2, HEX4, HEX5)
-    sjmp Display_end
-Display_high_digits:
-    showBCD(bcd1+3, HEX0, HEX1)
-    showBCD(bcd1+4, HEX2, HEX3)
-    mov HEX4, #0xff 
-    mov HEX5, #0xff 
-Display_end:
-    ret
+ret
 
-Shift_Digits_Left:
-    mov R0, #4 
-Shift_Digits_Left_L0:
-    clr c
-    MYRLC(bcd1+0)
-    MYRLC(bcd1+1)
-    MYRLC(bcd1+2)
-    MYRLC(bcd1+3)
-    MYRLC(bcd1+4)
-    djnz R0, Shift_Digits_Left_L0
-    mov a, R7
-    orl a, bcd1+0
-    mov bcd1+0, a
-    ret
+voltage_reading_7seg:
+	;after we call hex2bcd, the value of the voltage is stored in x
+	;the value of x is stored in bcd spread out through 4 bytes
+	;need to convert these decimal numbers in the bcd to the look up table
+	
+	;need to use the accumulator register
+	mov dptr, #myLUT
+	
+	;display digit 0 and 1 from (bcd+0)
+	mov a, bcd+0
+	anl a, #0FH
+	movc a, @a+dptr ;movc is moving a constant, which is at address a+address of data ptr
+	;or getting the pattern from the look up table
+	mov HEX0, a ;send the value to the hex0
+	
+	mov a, bcd+0
+	swap a ;need to get the higher part ex. 1111 0000	
+	anl a, #0FH
+	movc a, @a+dptr
+	mov HEX1, a
+	
+	;repeat with the other bcd all the way to bcd+2
+	
+	mov a, bcd+1
+	anl a, #0FH
+	movc a, @a+dptr ;movc is moving a constant, which is at address a+address of data ptr
+	;or getting the pattern from the look up table
+	mov HEX2, a ;send
+	
+	mov a, bcd+1
+	swap a ;need to get the higher part ex. 1111 0000	
+	anl a, #0FH
+	movc a, @a+dptr
+	mov HEX3, a
+	
+	mov a, bcd+2
+	anl a, #0FH
+	movc a, @a+dptr ;movc is moving a constant, which is at address a+address of data ptr
+	;or getting the pattern from the look up table
+	mov HEX4, a ;send
+	
+	mov a, bcd+2
+	swap a ;need to get the higher part ex. 1111 0000	
+	anl a, #0FH
+	movc a, @a+dptr
+	mov HEX5, a
+ret
 
-Shift_Digits_Right:
-    mov R0, #4 
-Shift_Digits_Right_L0:
-    clr c
-    MYRRC(bcd1+4)
-    MYRRC(bcd1+3)
-    MYRRC(bcd1+2)
-    MYRRC(bcd1+1)
-    MYRRC(bcd1+0)
-    djnz R0, Shift_Digits_Right_L0
-    ret
 
-; --- Main Program ---
 
-mycode: 
-    mov SP, #7FH
-    mov P0MOD, #10101111b
-    lcall Configure_Keypad_Pins ; Setup keypad pins
-    
-    setb reset
-    setb P1.2
-    setb P1.4
-    setb P1.6
-    setb P2.0
-    setb P2.2
-    setb P2.4
-    setb P2.6
-    setb P3.0
-    
-    lcall InitSerialPort
-    lcall LCD_4BIT
-    
-    mov ADC_C, #0x80 
-    lcall Wait50ms
-    
-    mov state, #0   
-    lcall Update_State_Display
-
-    mov R0, #0 
-forever: 
-    ; --- Part 1: Keypad Logic (Non-Blocking) ---
-    lcall Keypad
-    jnc skip_key_input ; Carry is 0 if no key pressed
-    lcall Shift_Digits_Left
-skip_key_input:
-    lcall Display ; Update HEX displays with keypad data
-
+voltage_reading:
     ; --- Part 2: Voltmeter Logic --- 
     mov a, SWA 
     anl a, #0x07
@@ -353,69 +313,267 @@ skip_key_input:
     Load_y(4096)
     lcall div32
     
+    Load_y(1000) ;convert to microvolts
+    lcall mul32
+    Load_y(12300);41*300 (gain of 300, replace with actual gain after)multipled by thermocouple wire temp change.
+    lcall div32
+    Load_y(22) ;cold junction temperature
+    lcall add32
+    ;after this, the result is stored in bcd spread out through 4 bytes.
+    
     lcall hex2bcd
-    lcall Display_Voltage_LCD 
-    
-    ; --- Part 3: FSM / Button Logic --- 
-    jb reset, check_increment
-    lcall Wait50Ms
-    jb reset, check_increment
-    
-    mov state, #0
-    lcall Update_State_Display
+   ;lcall Display_Voltage_LCD 
+ret
+
+
+
+
+; --- Main Program ---
+
+mycode:
+    mov SP, #7FH
+    mov P0MOD, #10101111b
+    mov P1MOD, #10101010b
+
+; keep P1.3 as input (you already do this)
+anl P1MOD, #11110111b     ; clear bit3
+
+
+    setb P1.4   ; weak pull-up behavior (if supported by your setup)
    
-wait_reset_release:
-    jnb reset, wait_reset_release
-    ljmp no_press   
-     
-check_increment:
-    jb BUTTON, no_press     
-    lcall Wait50ms          
-    jb BUTTON, no_press     
+
+
+
+    clr error_flag
+    clr SPEAKER
+    clr alarm_en_flag
+    clr ringing_flag
+    mov beep_count, #0
+
+    lcall Timer0_Init
+    setb EA
+
+    setb alarm_en_flag
+
+    lcall Configure_Keypad_Pins
     
+   anl P3MOD, #01111111b
+setb P3.7
+
+
+    
+
+
+    lcall turnoff_leds
+    lcall InitSerialPort
+    lcall LCD_4BIT
+
+    mov ADC_C, #0x80
+    lcall Wait50ms
+
+    mov state, #0
+    mov prev_state, #0
+    lcall Update_State_Display
+
+    mov sw_state, #0
+
+forever:
+
+
+; ---- Error button test (P3.7) ----
+    jb  ERROR_BTN, after_error_check     ; if high, not pressed
+    lcall Wait50ms
+    jb  ERROR_BTN, after_error_check     ; still not pressed? ignore         
+
+    ; pressed -> latch error
+    setb error_flag
+    mov  beep_count, #10                 ; 10 loud beeps
+    lcall Loud_Beep_Once
+    lcall Update_State_Display
+    
+wait_err_release:
+    jnb ERROR_BTN, wait_err_release
+
+after_error_check:
+lcall Do_ExtraBeeps
+
+
+jb  error_flag, chk_err_done_main
+    sjmp continue_main
+
+chk_err_done_main:
+    mov a, beep_count
+    jnz continue_main
+
+    ; done beeping
+    clr error_flag
+    mov state, #0
+    mov prev_state, #0
+    lcall Update_State_Display
+
+continue_main:
+    ; now continue with keypad / display / fsm
+
+
+    ; keypad
+    lcall Keypad
+    jnc check_mode
+    lcall Shift_Digits_Left
+    lcall Beep_Once
+    
+    
+
+
+check_mode:
+    jb SWA.6, mode_LCD
+    clr LEDRA.6
+    lcall turnoff_leds
+    lcall Display7seg
+    lcall voltage_reading
+    lcall Display_Voltage_LCD
+    ljmp fsm_part
+
+mode_LCD:
+    setb LEDRA.6
+    lcall clear7seg
+    lcall turnoff_leds
+    lcall Display_LCD
+    lcall voltage_reading
+    lcall voltage_reading_7seg
+    ljmp fsm_part
+
+fsm_part:
+    ; ---------------- RESET BUTTON (one-shot) ----------------
+    jb   reset, check_increment     ; not pressed? skip
+
+    lcall Wait50ms                  ; debounce
+    jb   reset, check_increment     ; false trigger? skip
+
+    ; ---- REAL RESET ACTION ----
+    clr  error_flag                 ; exit error mode
+    mov  beep_count, #0             ; cancel remaining beeps
+    clr  TR0                        ; stop speaker timer
+    clr  SPEAKER                    ; silence speaker
+
+    mov  state, #0
+    mov  prev_state, #0
+    lcall LCD_4bit
+    lcall Update_State_Display
+
+wait_reset_release:
+    jnb  reset, wait_reset_release  ; wait until button released
+
+    sjmp no_press                   ; return to main loop cleanly
+
+
+check_increment:
+    jb BUTTON, no_press
+    lcall Wait50ms
+    jb BUTTON, no_press
+
     inc state
     mov a, state
-    cjne a, #7, skip_reset  
+    cjne a, #7, skip_reset
     mov state, #0
-        
 skip_reset:
     lcall Update_State_Display
-    
+
 wait_release:
     jnb BUTTON, wait_release
 
-no_press:
-    lcall Wait50ms 
-    ljmp forever
-
-Update_State_Display: 
-    Set_Cursor(1, 1)
+    ; ----------------------------
+    ; STATE CHANGE LOGIC
+    ; ----------------------------
     mov a, state
-    cjne a, #0, state1 
+    cjne a, prev_state, STATE_CHANGED
+    sjmp no_press
+    
+    
+
+
+STATE_CHANGED:
+    mov prev_state, a
+    
+    jb  error_flag, done_beep_load
+    
+
+    ; always 1 beep on state change
+    lcall Beep_Once
+
+    ; default no extra beeps
+    mov beep_count, #0
+
+    ; state 1 ? total 5 beeps (1 already done + 4)
+    ;cjne a, #1, chk_state5
+    ;mov beep_count, #4
+    ;sjmp done_beep_load
+
+chk_state5:
+    ; state 5 ? total 5 beeps (same pattern)
+    cjne a, #5, chk_state_error
+    mov beep_count, #4
+    sjmp done_beep_load
+
+chk_state_error:
+    ; state 6 ? total 10 beeps
+jb  error_flag, set_10beeps
+sjmp done_beep_load
+
+set_10beeps:
+mov beep_count, #9
+
+
+done_beep_load:
+    sjmp no_press
+
+
+no_press:
+    lcall Wait50ms
+    ljmp forever
+    
+    
+ 
+
+; ----------------------------
+; LCD STATE DISPLAY
+; ----------------------------
+Update_State_Display:
+    Set_Cursor(1, 1)
+    
+jb  error_flag, show_error   ; short jump to a nearby label
+sjmp normal_state       ; skip error if flag = 0
+
+show_error:
+    ljmp s_error             ; long jump works anywhere
+
+normal_state:
+
+    
+    mov a, state
+    cjne a, #0, s1
     Send_Constant_String(#state0_msg)
     ret
-state1:
-    cjne a, #1, state2
+s1: cjne a, #1, s2
     Send_Constant_String(#state1_msg)
     ret
-state2:
-    cjne a, #2, state3
+s2: cjne a, #2, s3
     Send_Constant_String(#state2_msg)
     ret
-state3:
-    cjne a, #3, state4
+s3: cjne a, #3, s4
     Send_Constant_String(#state3_msg)
     ret
-state4:
-    cjne a, #4, state5
+s4: cjne a, #4, s5
     Send_Constant_String(#state4_msg)
     ret
-state5:
-    cjne a, #5, state6
+s5: cjne a, #5, s6
     Send_Constant_String(#state5_msg)
     ret
-state6:
+s6:
     Send_Constant_String(#state6_msg)
     ret
 
-end
+s_error:
+Send_Constant_String(#state_e_msg)
+ret
+
+END
