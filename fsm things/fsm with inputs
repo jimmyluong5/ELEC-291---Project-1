@@ -19,6 +19,9 @@ PWM           equ P2.7
 KEY_STAR      EQU 0x0E      ; *
 KEY_POUND     EQU 0x0F      ; #
 
+; LCD value field start column (after "SOAK Tmp: ")
+VALUE_COL     EQU 11        ; value occupies col 11..13
+
 ;=========================================================
 ; VECTORS
 ;=========================================================
@@ -61,21 +64,20 @@ ELCD_D6 equ P0.3
 ELCD_D7 equ P0.1
 
 $NOLIST
-$include(LCD_4bit_DE10Lite_no_RW.inc) ; ELCD_4BIT, Set_Cursor, WriteData, WriteCommand, Send_Constant_String, Wait_Milli_Seconds
-$include(Read_keypad.inc)            ; Keypad, Configure_Keypad_Pins, Shift_Digits_Left (uses R7)
+$include(LCD_4bit_DE10Lite_no_RW.inc)
+$include(Read_keypad.inc)
 $LIST
 
 ;=========================================================
-; STRINGS (line1 label ends with colon, line2 instructions)
+; STRINGS (colon included)
 ;=========================================================
 soaktemp_str:    db 'SOAK Tmp: ',0
-soaktime_str:    db 'SOAK time: ',0
+soaktime_str:    db 'SOAK time:',0
 reflowtemp_str:  db 'REFL Tmp: ',0
-reflowtime_str:  db 'REFL time: ',0
+reflowtime_str:  db 'REFL time:',0
 profile_ready:   db 'PROFILE READY',0
 
-help_str:        db '0-999  *=ENT  #=CLR',0
-done_str:        db '*=RESTART  #=CLR',0
+help_str:        db '0-999*=ENT#=CLR',0
 
 ;=========================================================
 ; 7-SEG LUT (0..9)
@@ -161,15 +163,9 @@ LCD_Clear:
     Wait_Milli_Seconds(#2)
     ret
 
-; Clear value area (3 chars) on line 1 starting at col 9
+; Clear the 3-digit value field on line 1 (VALUE_COL..VALUE_COL+2)
 LCD_ClearValueArea:
-    Set_Cursor(1,9)
-    WriteData(#' ')
-    WriteData(#' ')
-    WriteData(#' ')
-    ret
-LCD_ClearValueArea2:
-	Set_Cursor(1,12)
+    Set_Cursor(1,VALUE_COL)
     WriteData(#' ')
     WriteData(#' ')
     WriteData(#' ')
@@ -189,88 +185,26 @@ L2C1:
 ; R0=hundreds, R1=tens, R2=units
 ;=========================================================
 Get_LSD3:
-    ; units
     mov a,bcd+0
     anl a,#0Fh
     mov R2,a
 
-    ; tens
     mov a,bcd+0
     swap a
     anl a,#0Fh
     mov R1,a
 
-    ; hundreds
     mov a,bcd+1
     anl a,#0Fh
     mov R0,a
     ret
 
 ;=========================================================
-; SHOW VALUE ON LCD (3-char field, no leading zeros)
-; - field is ALWAYS 3 wide so you can see up to 3 digits
-; - prints right-aligned inside the field
-;   5   -> "  5"
-;   90  -> " 90"
-;   150 -> "150"
+; WriteDigitA: prints A (0..9) as ASCII on LCD
 ;=========================================================
-;=========================================================
-; SHOW VALUE ON LCD (3-char field, no leading zeros)
-; Right-aligned inside the 3-char field:
-;   5   -> "  5"
-;   90  -> " 90"
-;   150 -> "150"
-;=========================================================
-LCD_ShowInput:
-    lcall LCD_ClearValueArea
-    jb blank_flag, LSI_done
-
-    lcall Get_LSD3
-
-    ; if hundreds != 0 => 3 digits
-    mov a,R0
-    jnz LSI_3digits
-
-    ; if tens != 0 => 2 digits
-    mov a,R1
-    jnz LSI_2digits
-
-    ; else => 1 digit
-LSI_1digit:
-    Set_Cursor(1,14)     ; rightmost position of 3-char field
-    mov a,R2
-    lcall WriteDigitA
-    sjmp LSI_done
-
-LSI_2digits:
-    Set_Cursor(1,13)     ; columns 10-11
-    mov a,R1
-    lcall WriteDigitA
-    mov a,R2
-    lcall WriteDigitA
-    sjmp LSI_done
-
-LSI_3digits:
-    Set_Cursor(1,12)      ; columns 9-11
-    mov a,R0
-    lcall WriteDigitA
-    mov a,R1
-    lcall WriteDigitA
-    mov a,R2
-    lcall WriteDigitA
-    sjmp LSI_done
-
-LSI_done:
-    ret
-
-; ---------------------------------------------------------
-; Helpers to write A as ASCII digit using WriteData
-; (WriteData macro needs an immediate, so we branch)
-; ---------------------------------------------------------
 WriteDigitA:
-    ; A = 0..9
     cjne a,#0,WD1
-    WriteData(#'0')  ; 0
+    WriteData(#'0')  ;0
     ret
 WD1: cjne a,#1,WD2
     WriteData(#'1')
@@ -300,37 +234,60 @@ WD9:
     WriteData(#'9')
     ret
 
-LSI_printA:
-    ; prints digit in A (0..9) at current cursor
-    lcall WriteDigitA
-    ljmp LSI_done
+;=========================================================
+; LCD_ShowInput: right-aligned 3-char field
+; 5 -> "  5", 90 -> " 90", 150 -> "150"
+;=========================================================
+LCD_ShowInput:
+    lcall LCD_ClearValueArea
+    jb blank_flag, LSI_done
 
-LSI_printA_then_units:
-    lcall WriteDigitA
+    lcall Get_LSD3
+
+    mov a,R0
+    jnz LSI_3
+
+    mov a,R1
+    jnz LSI_2
+
+; 1 digit
+LSI_1:
+    Set_Cursor(1,VALUE_COL+2)
     mov a,R2
     lcall WriteDigitA
     sjmp LSI_done
 
-LSI_printA_then_tens_units:
-    lcall WriteDigitA
+; 2 digits
+LSI_2:
+    Set_Cursor(1,VALUE_COL+1)
     mov a,R1
     lcall WriteDigitA
     mov a,R2
     lcall WriteDigitA
     sjmp LSI_done
 
+; 3 digits
+LSI_3:
+    Set_Cursor(1,VALUE_COL)
+    mov a,R0
+    lcall WriteDigitA
+    mov a,R1
+    lcall WriteDigitA
+    mov a,R2
+    lcall WriteDigitA
+
+LSI_done:
+    ret
 
 ;=========================================================
-; SHOW VALUE ON HEX (HEX2 HEX1 HEX0) - no leading zeros
+; HEX_ShowInput (HEX2 HEX1 HEX0) no leading zeros
 ;=========================================================
 HEX_ShowInput:
     mov dptr,#T_7seg
-
     jb blank_flag, HX_blank
 
     lcall Get_LSD3
 
-    ; hundreds
     mov a,R0
     jz HX_h_blank
     movc a,@a+dptr
@@ -340,7 +297,6 @@ HX_h_blank:
     mov HEX2,#0FFh
 
 HX_tens:
-    ; tens printed if tens!=0 OR hundreds printed
     mov a,R1
     jnz HX_t_show
     mov a,R0
@@ -357,7 +313,6 @@ HX_units:
     mov a,R2
     movc a,@a+dptr
     mov HEX0,a
-
     mov HEX3,#0FFh
     mov HEX4,#0FFh
     mov HEX5,#0FFh
@@ -373,14 +328,14 @@ HX_blank:
     ret
 
 ;=========================================================
-; LCD UPDATE SCREENS (label line1 + help line2)
+; LCD_Update screens
 ;=========================================================
 LCD_Update:
     lcall LCD_Clear
     lcall LCD_ClearLine2
 
     mov a,param_index
-    cjne a, #0, L1y
+    cjne a,#0,L1y
     Set_Cursor(1,1)
     Send_Constant_String(#soaktemp_str)
     Set_Cursor(2,1)
@@ -414,12 +369,11 @@ L3y:
 L4y:
     Set_Cursor(1,1)
     Send_Constant_String(#profile_ready)
-    ;Send_Constant_String(#done_str)
-    ;lcall LCD_ClearValueArea2
+    ;lcall LCD_ClearValueArea
     ret
 
 ;=========================================================
-; SAVE PARAM (stores low 3 digits bcd+0/bcd+1)
+; SAVE PARAM
 ;=========================================================
 Save_Param:
     mov a,param_index
@@ -451,16 +405,13 @@ Handle_Key:
     ; ENTER (*)
     cjne a,#KEY_STAR,HK_clear
     lcall Save_Param
-
-    ; param_index++ capped at 4
     mov a,param_index
-    cjne a,#4,HK_inc_ok
+    cjne a,#4,HK_inc
     lcall Clear_Input
     lcall LCD_Update
     lcall HEX_ShowInput
     ret
-
-HK_inc_ok:
+HK_inc:
     inc param_index
     lcall Clear_Input
     lcall LCD_Update
@@ -468,7 +419,7 @@ HK_inc_ok:
     ret
 
 HK_clear:
-    ; CLEAR (#)
+    ; CLEAR (#) -> CLEAR LCD VALUE FIELD TOO
     cjne a,#KEY_POUND,HK_digit
     lcall Clear_Input
     lcall LCD_ShowInput
@@ -476,16 +427,16 @@ HK_clear:
     ret
 
 HK_digit:
-    ; accept only 0..9 (ignore A,B,C,D)
+    ; accept only 0..9
     mov a,R7
-    cjne a, #0Ah, HK_maybe
+    cjne a,#0Ah,HK_maybe
     ret
 HK_maybe:
     jc HK_ok
     ret
 HK_ok:
     clr blank_flag
-    lcall Shift_Digits_Left   ; uses R7 nibble
+    lcall Shift_Digits_Left
     lcall LCD_ShowInput
     lcall HEX_ShowInput
     ret
@@ -496,7 +447,6 @@ HK_ok:
 main:
     mov SP,#7Fh
 
-    ; P0.7,5,3,2,1,0 outputs (D7,D6,D5,E,D4,RS)
     mov P0MOD,#10101111b
     mov P1MOD,#10000010b
     mov P2MOD,#10000010b
