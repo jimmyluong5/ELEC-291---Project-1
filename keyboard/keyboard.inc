@@ -85,11 +85,15 @@ Keypad_Key_Code:
     ljmp keypad_90deg
 keypad_default: 
     clr ROW1
-    CHECK_COLUMN(COL1, #01H)
-    CHECK_COLUMN(COL2, #02H)
-    CHECK_COLUMN(COL3, #03H)
+    nop
+    nop
+    CHECK_COLUMN(COL1, #07H)
+    CHECK_COLUMN(COL2, #08H)
+    CHECK_COLUMN(COL3, #09H)
     CHECK_COLUMN(COL4, #0AH)
     setb ROW1
+    nop
+    nop
     clr ROW2
     CHECK_COLUMN(COL1, #04H)
     CHECK_COLUMN(COL2, #05H)
@@ -97,9 +101,9 @@ keypad_default:
     CHECK_COLUMN(COL4, #0BH)
     setb ROW2
     clr ROW3
-    CHECK_COLUMN(COL1, #07H)
-    CHECK_COLUMN(COL2, #08H)
-    CHECK_COLUMN(COL3, #09H)
+    CHECK_COLUMN(COL1, #01H)
+    CHECK_COLUMN(COL2, #02H)
+    CHECK_COLUMN(COL3, #03H)
     CHECK_COLUMN(COL4, #0CH)
     setb ROW3
     clr ROW4
