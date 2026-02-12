@@ -1,7 +1,8 @@
 # Standard Library
-import sys, time, math, random, csv, serial, requests, json, ctypes, smtplib
+import sys, time, math, random, csv, serial, requests, json, ctypes, smtplib, threading
 from itertools import count
 from email.message import EmailMessage
+from openai import OpenAI
 
 # Data and Plotting
 import numpy as np
@@ -36,18 +37,26 @@ class TextRedirector:
 # APPLICATION SETUP
 
 # create application
-ctypes.windll.shcore.SetProcessDpiAwareness(1) # Use actual screen instead of scaled
+#ctypes.windll.shcore.SetProcessDpiAwareness(1) # Use actual screen instead of scaled
 root = Tk()
+#root.tk.call('tk', 'scaling', 2)
 root.resizable(False, False)
 root.iconbitmap('gui/litovenicon.ico')
 root.title('Reflow Oven GUI')
-screen_width = root.winfo_screenwidth()
-screen_height = root.winfo_screenheight()
+
+try:
+    scale_percent = ctypes.windll.shcore.GetScaleFactorForDevice(0) # only for windows
+    display_scale = int(scale_percent/100)
+except:
+    display_scale = int(1.0)
+print(f'SCALE: {display_scale}')
+
+screen_width = int(display_scale*root.winfo_screenwidth())
+screen_height = int(display_scale*root.winfo_screenheight())
 root.geometry(f'{screen_width}x{screen_height}')
 default_font = tkfont.nametofont('TkDefaultFont')
-default_font.configure(family='xkcd script', size=15)
+default_font.configure(family='xkcd script', size=15*display_scale)
 root.option_add('*Font', default_font)
-
 # background wallpaper
 image = Image.open('gui/crumpledpaper_bg.jpg')
 bg_img = ImageTk.PhotoImage(image.resize((screen_width, screen_height), Image.Resampling.LANCZOS))
@@ -83,17 +92,17 @@ settings_frame.grid_columnconfigure(0, weight=1, uniform='a') # exports
 settings_frame.grid_columnconfigure(1, weight=2, uniform='a') # email
 settings_frame.grid_columnconfigure(2, weight=1, uniform='a') # serial
 # create frame for exports
-exports_frame = LabelFrame(settings_frame, text='Forward Files to Email', padx=5, pady=5)
+exports_frame = LabelFrame(settings_frame, text='Forward Files', padx=5, pady=5)
 exports_frame.grid(row=0, column=0, padx=5, pady=5, sticky='nsew', columnspan=1, rowspan=1)
 exports_frame.grid_rowconfigure((0,1), weight=1)
 exports_frame.grid_columnconfigure(0, weight=1)
 # create frame for email
-email_frame = LabelFrame(settings_frame, text='Enter Email for Notifications and Exports', padx=5, pady=5)
+email_frame = LabelFrame(settings_frame, text='Notifications and Exports', padx=5, pady=5)
 email_frame.grid(row=0, column=1, padx=5, pady=5, sticky='nsew', columnspan=1, rowspan=1)
 email_frame.grid_rowconfigure((0,1), weight=1, uniform='a')
 email_frame.grid_columnconfigure(0, weight=1)
 # create frame for serial
-serial_frame = LabelFrame(settings_frame, text='Serial Communication', padx=5, pady=5)
+serial_frame = LabelFrame(settings_frame, text='Communication', padx=5, pady=5)
 serial_frame.grid(row=0, column=2, padx=5, pady=5, sticky='nsew', columnspan=1, rowspan=1)
 serial_frame.grid_rowconfigure((0,1), weight=1)
 serial_frame.grid_columnconfigure(0, weight=1)
@@ -129,8 +138,8 @@ timeS_x, tempC_y, tempF_y, state_c = [], [], [], []
 poly_verts_C, poly_verts_F, poly_colors, poly_C, poly_F = [], [], [], None, None
 
 # system settings and modes
-PORTS = ['COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6']
-DATA = ['Recieve', 'Transmit']
+PORTS = ['COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9']
+DATA = ['Receive', 'Transmit']
 MODES = [
     ('Inactive', 0),
     ('Ramp to Soak', 1),
@@ -139,6 +148,7 @@ MODES = [
     ('Reflow', 4),
     ('Cooling', 5)
 ]
+soak_temp, soak_time, reflow_temp, reflow_time, ai_comment = 0, 0, 0, 0, None
 
 # graph fill colours
 COLORS = [
@@ -154,6 +164,54 @@ COLORS = [
 thermal_map = LinearSegmentedColormap.from_list('thermal', COLORS, N=256)
 
 # INPUT FUNCTIONS
+
+#initializing serial data communication
+ser = None
+current_port = PORTS[0]
+
+def init_serial(port):
+    global ser
+    try:
+        if ser and ser.isOpen():
+            ser.close()
+            print(f'Closed previous connection')
+        
+        ser = serial.Serial(
+            port=port,
+            baudrate=115200,
+            parity=serial.PARITY_NONE,
+            stopbits=serial.STOPBITS_ONE,
+            bytesize=serial.EIGHTBITS,
+            timeout=0.1
+        )
+        print(f'Connected to {port}')
+        return True
+    except Exception as e:
+        print(f'Failed to connect to {port}: {e}')
+        ser = None
+        return False
+    
+def on_port_change(*args):
+    global current_port
+    new_port = ports_var.get()
+
+    if new_port != current_port:
+        print(f'Port changed from {current_port} to {new_port}')
+        current_port = new_port
+        init_serial(new_port)
+
+#initialize port
+init_serial(current_port)
+
+def non_blocking_popup(title, message, type):
+    def run():
+        if type == 'info':
+            messagebox.showinfo(title, message)
+        elif type == 'error':
+            messagebox.showerror(title, message)
+        else: # modalyesno
+            messagebox.askquestion(title, message)
+    threading.Thread(target=run, daemon=True).start()
 
 # save email at the return key
 def save_email(event=None):
@@ -171,26 +229,75 @@ def get_last_input(event=None):
     chat_history.insert('1.0', f'USER: {last_input}\n\n')
     chat_history.config(state='disabled')
     input_tb.delete(0, END) # deletes current input
-    get_ai_output(last_input)
+    threading.Thread(target=get_ai_output, args=(last_input,)).start() # allows for multithreading, so gui doesn't freeze
 
 def get_ai_output(user_input):
-    global ai_output
-    ai_output = f'processing... {user_input}'
+    global ai_output, soak_temp, soak_time, reflow_temp, reflow_time, ai_comment
+    
     chat_history.config(state='normal')
-    chat_history.insert('1.0', f"OVEN AI: {ai_output}\n")
+    chat_history.insert('1.0', f"OVEN AI: thinking...\n")
     chat_history.config(state='disabled')
-    ai_current_output.config(state='normal')
-    ai_current_output.delete(0, END)
-    ai_current_output.insert(0, ai_output)
-    ai_current_output.config(state='readonly')
-    # CALL OVEN API
-    # try:
-    #     api_request = requests.get('openaikeyhere')
-    #     api = json.loads(api_request.content)
-    # except Exception as e:
-    #     api = e
-    #ai_output = ...
-    pass
+
+    #call openai api
+    try:
+        client = OpenAI(base_url='https://api.groq.com/openai/v1', api_key='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')
+
+        system_rules = '''
+            You are a universal thermal oven controller capable of both industrial soldering and food preparation. Format your response exactly as:
+            "soak_temp, soak_time, reflow_temp, reflow_time, shortcomment"
+
+            Rules for your response:
+            1. soak_temp and reflow_temp are measured in Celsius and must not exceed 250 Celsius. soak_time and reflow_time are measure in Seconds.
+            2. Usually, if input is unsafe or unrelated (whether that be the nature of the prompt or your potential response), return: "0, 0, 0, 0, Error: Safety/Relevance Breach"
+            3. No prose or extra text. Use integers for the first 4 values. The short comment justifies your settings briefly.
+
+            Comment: Although food preparation doesn't use soak/reflow temp/time, you must try and make do with these parameters
+        '''
+        system_rules_jesus = '''
+            1. Format your response to return: "0, 0, 0, 0, {comment}".
+            2. Your comment will create a fantastical over the top gospel/glaze of our electrical engineering professor "Jesús Calviño-Fraga". Make it related to his intelect, his humour, and his totally NOT receding hairline.
+        '''
+
+        # jesus exception
+        if 'jesus' in user_input.lower():
+            var_temp = 1
+            var_system_rules = system_rules_jesus
+            non_blocking_popup('Reflow Oven GUI', f'Do you accept Jesús as your lord and saviour?', 'askquestion')
+
+        else:
+            var_temp = 0
+            var_system_rules = system_rules
+
+        response = client.chat.completions.create(
+            model='llama-3.1-8b-instant',
+            messages=[
+                {'role': 'system', 'content': var_system_rules}, # so it doesn't go insano mode
+                {'role': 'user', 'content': user_input} # doesn't care about previous message
+            ],
+            temperature=var_temp
+        )
+        raw_ai_response = response.choices[0].message.content
+        ai_response = [item.strip() for item in raw_ai_response.split(',', 4)] # max of 4 commas for formatting
+
+        if len(ai_response) == 5:
+            soak_temp, soak_time, reflow_temp, reflow_time, ai_comment = ai_response
+            ai_output = f'{soak_temp},{soak_time},{reflow_temp},{reflow_time}'
+            display_message = f"Soak: {soak_temp}°C, {soak_time}s. Reflow: {reflow_temp}°C,{reflow_time}s\n{ai_comment}"
+            display_message2 = f"Soak: {soak_temp}°C, {soak_time}s. Reflow: {reflow_temp}°C {reflow_time}s"
+
+            #write to chat
+            chat_history.config(state='normal')
+            chat_history.delete('1.0', '2.0')
+            chat_history.insert('1.0', f"OVEN AI: {display_message}\n\n")
+            chat_history.config(state='disabled')
+
+            #write to ai output
+            ai_current_output.config(state='normal')
+            ai_current_output.delete(0, END)
+            ai_current_output.insert(0, display_message2)
+            ai_current_output.config(state='readonly')
+    except Exception as e:
+        print(f'AI Error: {e}')
 
 # update mode from serial
 def update_mode(new_value):
@@ -199,17 +306,17 @@ def update_mode(new_value):
 # check if user tried to select 'transmit' while AI is empty
 def validate_mode_change(*args):
     if data_var.get() == DATA[1] and ai_output is None:
-        data_var.set(DATA[0]) # force it back to recieve
+        data_var.set(DATA[0]) # force it back to receive
         root.update_idletasks() # update the button immediately
-        messagebox.showerror('Reflow Oven GUI', 'Cannot Transmit: No AI output generated yet')
+        non_blocking_popup('Reflow Oven GUI', 'Cannot Transmit: No AI output generated yet', 'error')
 
 # export csv popup
 def pop_csv():
     if user_email == None:
-        messagebox.showerror('Reflow Oven GUI', f'Please confirm your email to export CSV')
+        non_blocking_popup('Reflow Oven GUI', f'Please confirm your email to export CSV', 'error')
     else:
         try:
-            with open('serialdata.csv', 'w') as csv_file:
+            with open('gui/serialdata.csv', 'w') as csv_file:
                 csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames, delimiter=',')
 
                 csv_writer.writeheader()
@@ -224,17 +331,17 @@ def pop_csv():
             send_oven_email(subject, body, attachments)
             subject, body, attachments = None, None, None
 
-            messagebox.showinfo('Reflow Oven GUI', f'CSV file sent to {user_email}')
+            non_blocking_popup('Reflow Oven GUI', f'CSV file sent to {user_email}', 'info')
         except Exception as e:
-            messagebox.showerror(f'Failed to save CSV: {e}')
+            non_blocking_popup('Reflow Oven GUI', f'Failed to save CSV: {e}', 'error')
 
 # export image popup
 def pop_img():
     if user_email == None:
-        messagebox.showerror('Reflow Oven GUI', f'Please confirm your email to export IMG')
+        non_blocking_popup('Reflow Oven GUI', f'Please confirm your email to export IMG', 'error')
     else:
         try:
-            fig.savefig('reflowOvenPlot.png', dpi=300)            
+            fig.savefig('gui/reflowOvenPlot.png', dpi=300)            
             
             subject = 'Reflow Oven PNG Image'
             body = "Here's a copy of your most recent reflow oven plot as a png\nHave a good day!\n- Yours truly, OvenAI"
@@ -242,9 +349,9 @@ def pop_img():
             send_oven_email(subject, body, attachments)
             subject, body, attachments = None, None, None
 
-            messagebox.showinfo('Reflow Oven GUI', f'IMG file sent to {user_email}')
+            non_blocking_popup('Reflow Oven GUI', f'IMG file sent to {user_email}', 'info')
         except Exception as e:
-            messagebox.showerror(f'Failed to save IMG: {e}')
+            non_blocking_popup('Reflow Oven GUI', f'Failed to save IMG: {e}', 'error')
 
 # EMAIL STUFF
 def send_oven_email(subject, body, attachments=None):
@@ -267,7 +374,7 @@ def send_oven_email(subject, body, attachments=None):
                 elif filepath.endswith('.csv'):
                     msg.add_attachment(file_data, maintype='text', subtype='csv', filename=f.name)
                 else:
-                    messagebox.showerror(f'Could not locate the proper file path: {filepath}')
+                    non_blocking_popup('Reflow Oven GUI', f'Could not locate the proper file path: {filepath}', 'error')
                     return
 
     try:      
@@ -301,10 +408,11 @@ def animate(_):
     global last_mode, index
 
     current_mode = mode_var.get()
+    data_mode = data_var.get() # get current transmit/receive mode from gui NOT DEFINED
 
     # FSM to check for state transition logic
-    # inactive > active
-    if last_mode == 0 and current_mode != 0:
+    # inactive > ramptosoak
+    if last_mode == 0 and current_mode == 1:
         print("Run Started: Resetting Graph Data")
         index = count() 
         timeS_x, tempC_y, tempF_y, state_c = [], [], [], []
@@ -314,51 +422,95 @@ def animate(_):
         poly_C.set_verts([])
         poly_F.set_verts([])
     # active > inactive
-    elif last_mode != 0 and current_mode == 0:
+    elif last_mode == 5 and current_mode == 0:
         print("Run Complete: Finalizing Data...")
         try:
-            # send_completion_email()
-            pass
+            subject = 'Reflow Oven Complete'
+            body = "Your oven has cooled down to room temperature\nHave a good day!\n- Yours truly, OvenAI"
+            attachments = None
+            send_oven_email(subject, body, attachments)
+            subject, body, attachments = None, None, None
         except Exception as e:
             pass
-    
+
     last_mode = current_mode
-    
-    # skip the graph generation
-    if current_mode == 0:
+
+    # MAY HAVE TO CHANGE THIS
+    if ser is None or not ser.isOpen():
         return lineC, lineF
 
     #while ser.in_waiting > 0:
     try:
-        # recieve and decipher serial data
-        #data = ser.readline().decode('utf-8').strip()
-        #split_data = data.split(',')
-        #timeS_data = 0.5*next(index)
-        #tempC_data = float(split_data[0])
-        #tempF_data = 1.8*tempC_data+32
-        #state_data = str(split_data[1])
-        
-        # example function generation, to be swapped out for serial input above
-        frequency = 0.05 
-        amplitude = (250 - 25) / 2
-        midpoint = 25 + amplitude
-        timeS_data = 0.5*next(index)
-        tempC_data = midpoint + amplitude * math.sin(frequency * timeS_data) #float(split_data[0])
-        tempF_data = 1.8*tempC_data+32
-        state_data = random.choice([m[0] for m in MODES]) #split_data[1]
+        # receive mode - reading data from de10
+        if data_mode == DATA[0]: #receive
 
-        # append data to a growing list
-        timeS_x.append(timeS_data)
-        tempC_y.append(tempC_data)
-        tempF_y.append(tempF_data)
-        state_c.append(state_data)
+            if ser.isOpen and ser.in_waiting > 0:
+                data = ser.readline().decode('utf-8').strip()
+
+                if data:
+                    print(f'Raw data: {data}') #for debugging
+                    split_data = data.split(',')
+                    
+                    if len(split_data) >= 2:
+                        try:
+                            timeS_data = 0.5 * next(index)
+                            tempC_data = float(split_data[0])
+                            tempF_data = 1.8*tempC_data+32
+                            state_data = int(split_data[1])
+                            
+                            if 0<= state_data <= 5:
+                                state_data = split_data[1]
+                                update_mode(state_data)
+
+                            # skip the graph generation
+                            if current_mode == 0:
+                                return lineC, lineF
+                            if ser is None or not ser.isOpen:
+                                return lineC, lineF
+
+                            #state_data = random.choice([m[0] for m in MODES]) #for testing
+
+                            # example function generation, to be swapped out for serial input above
+                            # frequency = 0.05 
+                            # amplitude = (250 - 25) / 2
+                            # midpoint = 25 + amplitude
+                            # timeS_data = 0.5*next(index)
+                            # tempC_data = midpoint + amplitude * math.sin(frequency * timeS_data) #float(split_data[0])
+                            # tempF_data = 1.8*tempC_data+32
+                            # state_data = random.choice([m[0] for m in MODES]) #split_data[1]
+                        
+                            timeS_x.append(timeS_data)
+                            tempC_y.append(tempC_data)
+                            tempF_y.append(tempF_data)
+                            state_c.append(state_data)
+                        
+                        except ValueError as ve:
+                            print(f'Parse error: {ve} - Data: {data}')
+                            return lineC, lineF
+                    else:
+                        print(f'Incomplete data packet: {data}')
+                        return lineC, lineF
         
+        elif data_mode == DATA[1]: #transmit mode - sending ai output to microcontroller
+            # only if an ai output has been generated
+            if ai_output is not None:
+                ser.reset_input_buffer()
+                message = f'ai_output\n'
+                ser.write(message.encode('utf-8'))
+                ser.flush()
+                print(f'Transmitted to DE10: {message.strip()}')
+                
+                return lineC, lineF
+
+        else:
+            return lineC, lineF # early exists
+
         # update line to include newest inputs
         lineC.set_data(timeS_x, tempC_y)
         lineF.set_data(timeS_x, tempF_y)
 
         # more efficient way to fill graph colours
-        if len(timeS_x) > 1:
+        if len(timeS_x) > 1: # when we get atleast two data points
             current_hex = get_thermal_hex(tempC_data)
 
             x1, x2 = timeS_x[-2], timeS_x[-1]
@@ -366,7 +518,7 @@ def animate(_):
             y1_F, y2_F = tempF_y[-2], tempF_y[-1]
 
             # Add slight overlap to eliminate gaps
-            overlap = 0.05
+            overlap = 0.01 # CHANGE TO 0.05 IN DEMO
             vert_C = [(x1-overlap, 0), (x1-overlap, y1_C), (x2+overlap, y2_C), (x2+overlap, 0)]
             vert_F = [(x1-overlap, 0), (x1-overlap, y1_F), (x2+overlap, y2_F), (x2+overlap, 0)]
             
@@ -408,6 +560,7 @@ def animate(_):
 # graph theme settings
 plt.xkcd()
 plt.rcParams['font.family'] = 'xkcd script'
+plt.rcParams['font.size'] = 12*display_scale
 
 # used to progress the index every cycle (# of samples)
 index = count()
@@ -416,11 +569,16 @@ last_mode = 0
 
 # create 2 graphs in 1 figure
 fig, (axC, axF) = plt.subplots(2, 1)
-plt.subplots_adjust(hspace=0.25)
 
 # line settings
-lineC, = axC.plot(timeS_x, tempC_y, color="#000000", linestyle='solid', label='Celsius', lw=3)
-lineF, = axF.plot(timeS_x, tempF_y, color='#000000', linestyle='solid', label='Fahrenheit', lw=3)
+lineC, = axC.plot(timeS_x, tempC_y, color="#000000", linestyle='solid', label='Celsius', lw=1*display_scale)
+lineF, = axF.plot(timeS_x, tempF_y, color='#000000', linestyle='solid', label='Fahrenheit', lw=1*display_scale)
+
+for location in ['left', 'right', 'top', 'bottom']:
+    axC.spines[location].set_linewidth(1*display_scale)
+    axF.spines[location].set_linewidth(1*display_scale)
+
+fig.subplots_adjust(left=0.11, bottom=0.09, right=0.98, top=0.95)
 
 # create graph axes and grids
 axC.set_title('Live Temperature Monitor')
@@ -446,7 +604,7 @@ ani = FuncAnimation(plt.gcf(), animate, interval=500, blit=False, cache_frame_da
 # DISPLAY RADIOBUTTON MODES R0-C1
 
 mode_var = IntVar()
-mode_var.set(1)
+mode_var.set(0)
 
 # create disabled radiobuttons
 for i, (mode_text, mode_value) in enumerate(MODES):
@@ -465,6 +623,7 @@ img_button.grid(row=1, column=0, sticky='nsew', padx=5, pady=5)
 
 ports_var = StringVar()
 ports_var.set(PORTS[0])
+ports_var.trace_add('write', on_port_change) # watching for port change
 data_var = StringVar()
 data_var.set(DATA[0])
 data_var.trace_add('write', validate_mode_change) # watching for mode change
@@ -537,6 +696,11 @@ print("Terminal Redirect: SUCCESS")
 
 # clears all background processes to prevent memory leaks
 def on_closing(event=None):
+    global ser
+
+    if ser and ser.isOpen:
+        ser.close()
+
     ani.event_source.stop()
     root.quit()
     root.destroy()
