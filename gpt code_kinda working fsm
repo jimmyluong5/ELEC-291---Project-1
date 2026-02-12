@@ -28,7 +28,7 @@ TIMER0_RELOAD EQU ((65536-(CLK/(12*TIMER0_RATE))))
 TIMER2_RATE   EQU 1000
 TIMER2_RELOAD EQU ((65536-(CLK/(12*TIMER2_RATE))))
 
-SPEAKER       EQU P2.1
+SPEAKER       EQU P1.5
 PWM           EQU P2.7
 
 ;=========================================================
@@ -1364,10 +1364,10 @@ DSA_done:
 ;=========================================================
 Fake_OvenTemp_Update:
     mov a, ms_count+0
-    orl a, ms_count+1
+    orl a, ms_count+1;
     jnz FOT_done
 
-    jb paused_flag, FOT_done
+   jb paused_flag, FOT_done
     jb error_demo_flag, FOT_done
 
     mov a, run_flag
@@ -1633,8 +1633,9 @@ main:
     mov SP,#7Fh
 
     mov P0MOD,#10101111b
-    mov P1MOD,#10000010b
+    mov P1MOD,#10100010b
     mov P2MOD,#10000010b
+    setb P1.5
 
     clr a
     mov param_index,a
