@@ -5,50 +5,17 @@ $LIST
 ;=========================================================
 ; REFLOW OVEN CONTROLLER (DE10-Lite CV-8052) - SINGLE FILE
 ;=========================================================
-; UI (when NOT running):
-;   - Keypad sets profile params (packed BCD): soak temp/time, peak temp, reflow time
-;   - Pages: 0..3 editing, Page 4 shows "PROFILE READY"
-;   - SW5 selects DUTY EDIT page (0..100%) and you can still set PWM duty
-;   - Digits 0..9 type into 3-digit field
-;   - * = ENTER/save, # = CLEAR input
-;
-; RUN (when running):
-;   - Start/Stop button = Row4 Col4 keypad key (KEY_START_BTN)
-;   - LCD Line 1: STATE TITLE only (no profile text)
-;   - LCD Line 2:
-;        SW5=0 -> shows Temperature "T:xxx"
-;        SW5=1 -> shows Duty "PWM:xxx%"
-;   - HEX2..HEX0 always show oven temperature (decimal)
-;
-; Timers:
-;   - Timer2 = 1kHz ISR:
-;        * Generates PWM on P2.7 from PWM_duty (0..100)
-;        * Builds 1-second counter in 'seconds'
-;   - Timer0 = square-wave audio (kept from your original)
-;
-; FSM states (matches your diagram labels):
-;   0 IDLE
-;   1 RAMP TO SOAK      (full power until oven >= soak_temp)
-;   2 SOAK             (low power until seconds >= soak_time)
-;   3 RAMP TO PEAK      (use ?T table toward peak; when reach 217C -> start REFLOW time)
-;   4 REFLOW            (reflow time counts here; must remain >=217C; still allowed to rise to peak)
-;   5 COOLING           (heater off; cool to 50C then stop)
-;
-; IMPORTANT (your request):
-;   - Reflow time starts as soon as oven reaches 217C (LIQUIDUS)
-;   - While in REFLOW (state 4) and time not done:
-;       * keep oven >=217C
-;       * continue heating toward peak using ?T table until peak reached
-;       * once peak reached, PWM goes 0% (coast). If it falls to 217C, hold 5-10% duty.
-;   - After reflow time done:
-;       * PWM = 0%
-;       * wait until oven <=217C, then go to COOLING (state 5)
-;
-; DEBUG TEMP:
-;   - Fake_OvenTemp_Update updates oven_temp once per second using PWM_duty
-;   - Replace Fake_OvenTemp_Update later with real sensor code
+; Key additions (per your requests):
+;   - STOP (C=Row3 Col4, 0x0C): click pauses everything (FSM/time/temp)
+;   - Resume: press START (D=Row4 Col4, 0x0D) to resume from same state/temp/time
+;   - ERROR button (B=Row2 Col4, 0x0B): 10 beeps + error screen, then returns to menu
+;   - Running time shown on LCD line 2 (with temp/duty)
+;   - Press keypad '1' (0x01) to reset running time
+;   - Temp input for SOAK TEMP and PEAK TEMP limited to 250C, else "INVALID TEMP"
+;   - Switch 5 restored:
+;       * NOT running: SW5 selects duty edit page (set PWM)
+;       * Running: SW5 toggles view between Temp+Time and Duty+Time
 ;=========================================================
-
 
 ;=========================================================
 ; CLOCK + TIMERS
@@ -61,34 +28,38 @@ TIMER0_RELOAD EQU ((65536-(CLK/(12*TIMER0_RATE))))
 TIMER2_RATE   EQU 1000
 TIMER2_RELOAD EQU ((65536-(CLK/(12*TIMER2_RATE))))
 
-SOUND_OUT     EQU P2.1
+SPEAKER       EQU P2.1
 PWM           EQU P2.7
 
-KEY_STAR      EQU 0x0E      ; *
-KEY_POUND     EQU 0x0F      ; #
-
-;---------------------------------------------------------
-; START/STOP button = Row4 Col4 on keypad
-; NOTE: This keycode depends on your Read_keypad.inc mapping.
-; Commonly Row4 Col4 ("D") is 0x0D. If yours differs, change only this.
-;---------------------------------------------------------
-KEY_START_BTN EQU 0x0D
-
-; LCD value field start column (after "SOAK Tmp: ")
-VALUE_COL     EQU 11        ; value occupies col 11..13
+;=========================================================
+; KEYS
+;=========================================================
+KEY_STAR        EQU 0x0E      ; *
+KEY_POUND       EQU 0x0F      ; #
+KEY_ERR_BTN     EQU 0x0B      ; B (Row2 Col4)
+KEY_STOP_BTN    EQU 0x0C      ; C (Row3 Col4)
+KEY_START_BTN   EQU 0x0D      ; D (Row4 Col4)
+KEY_TIME_RESET  EQU 0x01      ; '1' clears running time
 
 ;=========================================================
-; DUTY-CYCLE EDIT MODE SWITCH
-; NOTE: If your switch symbol isn't SWA, change this line
+; LCD + SWITCH
 ;=========================================================
+VALUE_COL     EQU 11
 SW5           EQU SWA.5
 
 ;=========================================================
-; REFLOW LIQUIDUS CONSTRAINT + HOLD DUTY
+; REFLOW / LIMITS
 ;=========================================================
 LIQUIDUS      EQU 217
-HOLD_DUTY     EQU 8          ; 5-10% keepalive at 217 barrier
+HOLD_DUTY     EQU 8
+MAX_TEMP      EQU 250
 
+;=========================================================
+; STATES
+;=========================================================
+ERROR_STATE   EQU 6
+COOL_STATE    EQU 5
+STALL_LIMIT   EQU 60
 
 ;=========================================================
 ; VECTORS
@@ -100,42 +71,56 @@ org 0x000B
 org 0x002B
     ljmp Timer2_ISR
 
-
 ;=========================================================
 ; DATA
 ;=========================================================
 dseg at 0x30
-PWM_counter:  ds 1
-PWM_duty:     ds 1
+PWM_counter:        ds 1
+PWM_duty:           ds 1
 
-bcd:          ds 5          ; packed BCD digit buffer (typed digits go here)
-param_index:  ds 1          ; 0..4
+bcd:                ds 5
+param_index:        ds 1
 
-soak_temp:    ds 2          ; packed BCD (3 digits) in 2 bytes
-soak_time:    ds 2
-reflow_temp:  ds 2          ; used as PEAK TEMP target
-reflow_time:  ds 2          ; used as REFLOW TIME duration (time above liquidus)
+soak_temp:          ds 2
+soak_time:          ds 2
+reflow_temp:        ds 2
+reflow_time:        ds 2
 
-;-----------------------------
-; FSM DATA
-;-----------------------------
-state:        ds 1          ; 0..5
-run_flag:     ds 1          ; 0=stopped, 1=running
+state:              ds 1
+run_flag:           ds 1
 
-ms_count:     ds 2          ; 0..999 from Timer2 1kHz
-seconds:      ds 2          ; elapsed seconds within current state
+ms_count:           ds 2
+seconds:            ds 2          ; state elapsed (counts only when running & not paused)
+run_time:           ds 2          ; total running time (counts only when running & not paused)
 
-oven_temp:    ds 2          ; oven temperature (binary °C) - DEBUG generator updates this
+oven_temp:          ds 2
 
-tmp16:        ds 2          ; scratch 16-bit
-target16:     ds 2          ; scratch 16-bit
+tmp16:              ds 2
+target16:           ds 2
+
+prev_state:         ds 1
+beep_count:         ds 1
+
+last_temp_L:        ds 1
+last_temp_H:        ds 1
+temp_stall_secs:    ds 1
+
+error_flag:         ds 1
+reflow_done_flag:   ds 1
+reflow_beeped:      ds 1
+
+key_lock:           ds 1
+last_key:           ds 1
+
+err_hold_secs:      ds 1
 
 bseg
-blank_flag:   dbit 1         ; 1 = nothing typed yet
-duty_mode:    dbit 1         ; 1 = SW5 duty edit page active (ONLY when NOT running)
+blank_flag:     dbit 1
+duty_mode:      dbit 1
+paused_flag:    dbit 1      ; STOP click sets this
+error_demo_flag:dbit 1      ; error screen active
 
 cseg
-
 
 ;=========================================================
 ; LCD WIRING
@@ -152,9 +137,8 @@ $include(LCD_4bit_DE10Lite_no_RW.inc)
 $include(Read_keypad.inc)
 $LIST
 
-
 ;=========================================================
-; STRINGS (<=16 chars for full row)
+; STRINGS (<=16 chars)
 ;=========================================================
 soaktemp_str:    db 'SOAK Tmp: ',0
 soaktime_str:    db 'SOAK time:',0
@@ -162,22 +146,23 @@ reflowtemp_str:  db 'PEAK Tmp: ',0
 reflowtime_str:  db 'REFL time:',0
 profile_ready:   db 'PROFILE READY',0
 pwm_str:         db 'PWM Duty: ',0
+help_str:        db '0-250*=ENT#=CLR',0
 
-help_str:        db '0-999*=ENT#=CLR',0
-
-; RUN display (line 1)
 s_idle:          db 'IDLE            ',0
 s_ramp_soak:     db 'RAMP TO SOAK    ',0
 s_soak:          db 'SOAK            ',0
 s_ramp_peak:     db 'RAMP TO PEAK    ',0
 s_reflow:        db 'REFLOW          ',0
 s_cool:          db 'COOLING         ',0
+s_error:         db 'ERROR FIX NOW   ',0
 
-; RUN display (line 2)
+err_msg:         db 'Press 1 to reset',0
+inv_msg:         db 'INVALID TEMP    ',0
+
 temp_lbl:        db 'T:',0
 duty_lbl:        db 'PWM:',0
 pct_lbl:         db '%',0
-
+time_lbl:        db ' t:',0
 
 ;=========================================================
 ; 7SEG TABLE
@@ -186,27 +171,70 @@ T_7seg:
     DB 0xC0,0xF9,0xA4,0xB0,0x99
     DB 0x92,0x82,0xF8,0x80,0x90
 
-
 ;=========================================================
-; TIMER0 (SQUARE WAVE AUDIO)
+; TIMER0 (AUDIO TONE)
 ;=========================================================
 Timer0_Init:
     mov TMOD,#01h
     mov TH0,#high(TIMER0_RELOAD)
     mov TL0,#low(TIMER0_RELOAD)
     setb ET0
-    setb TR0
+    clr  TR0
+    clr  SPEAKER
     ret
 
 Timer0_ISR:
     mov TH0,#high(TIMER0_RELOAD)
     mov TL0,#low(TIMER0_RELOAD)
-    cpl SOUND_OUT
+    cpl SPEAKER
     reti
 
+;=========================================================
+; DELAYS + BEEPS
+;=========================================================
+Wait50ms:
+    mov R0, #30
+W50_L3: mov R1, #74
+W50_L2: mov R2, #250
+W50_L1: djnz R2, W50_L1
+        djnz R1, W50_L2
+        djnz R0, W50_L3
+    ret
+
+Wait1s:
+    mov R4,#20
+W1s_lp:
+    lcall Wait50ms
+    djnz R4,W1s_lp
+    ret
+
+Loud_Beep_Once:
+    setb TR0
+    lcall Wait50ms
+    lcall Wait50ms
+    clr  TR0
+    clr  SPEAKER
+    lcall Wait50ms
+    ret
+
+Beep_Once:
+    setb TR0
+    lcall Wait50ms
+    clr  TR0
+    clr  SPEAKER
+    ret
+
+Do_ExtraBeeps:
+    mov a, beep_count
+    jz  DEB_done
+    lcall Loud_Beep_Once
+    dec beep_count
+DEB_done:
+    ret
 
 ;=========================================================
-; TIMER2 (1kHz ISR) + PWM (0..100%) + 1-second timebase
+; TIMER2 (1kHz ISR) + PWM + TIMEBASE
+; - seconds++ and run_time++ only when run_flag=1 AND paused_flag=0 AND error_demo_flag=0
 ;=========================================================
 Timer2_Init:
     mov T2CON,#0
@@ -223,6 +251,8 @@ Timer2_Init:
     mov ms_count+1,a
     mov seconds+0,a
     mov seconds+1,a
+    mov run_time+0,a
+    mov run_time+1,a
 
     setb ET2
     setb TR2
@@ -233,9 +263,7 @@ Timer2_ISR:
     push acc
     push psw
 
-    ;-----------------------------
-    ; PWM (0..100)
-    ;-----------------------------
+    ; PWM
     mov a, PWM_duty
     cjne a, #100, pwm_normal
     setb PWM
@@ -249,7 +277,6 @@ p1x:
     cjne a, PWM_duty, p2x
     clr PWM
 p2x:
-
 pwm_update_counter:
     mov a, PWM_counter
     inc a
@@ -258,34 +285,47 @@ pwm_update_counter:
 p3x:
     mov PWM_counter, a
 
-    ;-----------------------------
-    ; 1-second counter from 1kHz ISR
-    ;-----------------------------
+    ; ms_count++
     inc ms_count+0
     mov a, ms_count+0
     jnz T2_ms_nocarry
     inc ms_count+1
 T2_ms_nocarry:
 
+    ; if ms_count != 1000 -> exit
     mov a, ms_count+0
-    cjne a, #LOW(1000), T2_exit_time
+    cjne a, #LOW(1000), T2_exit
     mov a, ms_count+1
-    cjne a, #HIGH(1000), T2_exit_time
+    cjne a, #HIGH(1000), T2_exit
 
+    ; ms_count = 0
     clr a
     mov ms_count+0, a
     mov ms_count+1, a
 
+    ; only count time when actually running and not paused/error screen
+    mov a, run_flag
+    jz  T2_exit
+    jb paused_flag, T2_exit
+    jb error_demo_flag, T2_exit
+
+    ; seconds++
     inc seconds+0
     mov a, seconds+0
-    jnz T2_exit_time
+    jnz T2_rt
     inc seconds+1
 
-T2_exit_time:
+T2_rt:
+    ; run_time++
+    inc run_time+0
+    mov a, run_time+0
+    jnz T2_exit
+    inc run_time+1
+
+T2_exit:
     pop psw
     pop acc
     reti
-
 
 ;=========================================================
 ; INPUT HELPERS
@@ -299,7 +339,6 @@ Clear_Input:
     mov bcd+4,a
     setb blank_flag
     ret
-
 
 ;=========================================================
 ; LCD HELPERS
@@ -324,10 +363,8 @@ L2C1:
     djnz R0,L2C1
     ret
 
-
 ;=========================================================
 ; GET LSD 3 DIGITS FROM BCD INTO R0/R1/R2
-; R0=hundreds, R1=tens, R2=units
 ;=========================================================
 Get_LSD3:
     mov a,bcd+0
@@ -344,45 +381,43 @@ Get_LSD3:
     mov R0,a
     ret
 
-
 ;=========================================================
-; WriteDigitA: prints A (0..9) as ASCII on LCD
+; WriteDigitA
 ;=========================================================
 WriteDigitA:
     cjne a,#0,WD1
-    WriteData(#'0')
+    WriteData(#'0')  
     ret
 WD1: cjne a,#1,WD2
-    WriteData(#'1')
+    WriteData(#'1')  
     ret
 WD2: cjne a,#2,WD3
-    WriteData(#'2')
+    WriteData(#'2')  
     ret
 WD3: cjne a,#3,WD4
-    WriteData(#'3')
+    WriteData(#'3')  
     ret
 WD4: cjne a,#4,WD5
-    WriteData(#'4')
+    WriteData(#'4')  
     ret
 WD5: cjne a,#5,WD6
-    WriteData(#'5')
+    WriteData(#'5')  
     ret
 WD6: cjne a,#6,WD7
-    WriteData(#'6')
+    WriteData(#'6')  
     ret
 WD7: cjne a,#7,WD8
-    WriteData(#'7')
+    WriteData(#'7')  
     ret
 WD8: cjne a,#8,WD9
-    WriteData(#'8')
+    WriteData(#'8')  
     ret
 WD9:
     WriteData(#'9')
     ret
 
-
 ;=========================================================
-; LCD_ShowInput: right-aligned 3-char field
+; LCD_ShowInput
 ;=========================================================
 LCD_ShowInput:
     lcall LCD_ClearValueArea
@@ -422,9 +457,8 @@ LSI_3:
 LSI_done:
     ret
 
-
 ;=========================================================
-; HEX_ShowInput (HEX2 HEX1 HEX0) no leading zeros
+; HEX_ShowInput
 ;=========================================================
 HEX_ShowInput:
     mov dptr,#T_7seg
@@ -471,10 +505,8 @@ HX_blank:
     mov HEX5,#0FFh
     ret
 
-
 ;=========================================================
-; LCD_Update screens for each parameter (ONLY when NOT running)
-; If duty_mode=1, show PWM Duty edit page instead
+; LCD_Update (ONLY when NOT running and not in error screen)
 ;=========================================================
 LCD_Update:
     lcall LCD_Clear
@@ -530,120 +562,35 @@ L4y:
     Send_Constant_String(#profile_ready)
     ret
 
-
 ;=========================================================
-; SAVE PARAMS (from typed bcd)
-;=========================================================
-Save_Param:
-    mov a,param_index
-    cjne a,#0,s1
-    mov soak_temp+0,bcd+0
-    mov soak_temp+1,bcd+1
-    ret
-s1:
-    cjne a,#1,s2
-    mov soak_time+0,bcd+0
-    mov soak_time+1,bcd+1
-    ret
-s2:
-    cjne a,#2,s3
-    mov reflow_temp+0,bcd+0
-    mov reflow_temp+1,bcd+1
-    ret
-s3:
-    mov reflow_time+0,bcd+0
-    mov reflow_time+1,bcd+1
-    ret
-
-
-;=========================================================
-; SAVE DUTY (0..100) from typed digits (clamp >100)
-;=========================================================
-Save_Duty:
-    jb blank_flag, SD_zero
-
-    lcall Get_LSD3
-
-    mov a, R0
-    cjne a, #0, SD_h_nonzero
-    mov a, R1
-    mov b, #10
-    mul ab
-    add a, R2
-    mov PWM_duty, a
-    ret
-
-SD_h_nonzero:
-    cjne a, #1, SD_clamp100
-    mov a, R1
-    orl a, R2
-    jz SD_exact100
-SD_clamp100:
-    mov PWM_duty, #100
-    ret
-
-SD_exact100:
-    mov PWM_duty, #100
-    ret
-
-SD_zero:
-    mov PWM_duty, #0
-    ret
-
-
-;=========================================================
-; PWM SETTERS (used by FSM)
-;=========================================================
-Set_PWM_Off:   
-mov PWM_duty, #0    
-ret
-Set_PWM_Full:  
-mov PWM_duty, #100  
-ret
-Set_PWM_Low:   
-mov PWM_duty, #30   
-ret
-Set_PWM_Med:   
-mov PWM_duty, #60   
-ret
-
-
-;=========================================================
-; PackedBCD3_to_Bin16_DATA
-; IN:  R0 -> packed BCD (2 bytes) in internal RAM
-; OUT: tmp16 = binary (0..999)
+; PackedBCD3_to_Bin16_DATA  (R0 -> 2 bytes packed BCD)
 ;=========================================================
 PackedBCD3_to_Bin16_DATA:
     push 0
     push acc
     push b
 
-    ; units
     mov a, @r0
     anl a, #0Fh
     mov R2, a
 
-    ; tens
     mov a, @r0
     swap a
     anl a, #0Fh
     mov R1, a
 
-    ; hundreds from second byte low nibble
     inc R0
     mov a, @r0
     anl a, #0Fh
     mov R3, a
     dec R0
 
-    ; tmp16 = hundreds*100
     mov a, R3
     mov b, #100
     mul ab
     mov tmp16+0, a
     mov tmp16+1, b
 
-    ; + tens*10
     mov a, R1
     mov b, #10
     mul ab
@@ -653,7 +600,6 @@ PackedBCD3_to_Bin16_DATA:
     addc a, tmp16+1
     mov tmp16+1, a
 
-    ; + units
     mov a, tmp16+0
     add a, R2
     mov tmp16+0, a
@@ -666,9 +612,8 @@ PackedBCD3_to_Bin16_DATA:
     pop 0
     ret
 
-
 ;=========================================================
-; GE16: C=1 if (tmp16 >= target16) else C=0
+; GE16: C=1 if tmp16 >= target16
 ;=========================================================
 GE16:
     push acc
@@ -690,37 +635,137 @@ GE16_no:
     pop acc
     ret
 
+;=========================================================
+; Validate_Temp250
+; IN: tmp16 = value (0..999)
+; OUT: C=1 if <=250, C=0 if >250
+;=========================================================
+Validate_Temp250:
+    ; if tmp16 >= 251 -> invalid
+    mov target16+0, #LOW(251)
+    mov target16+1, #HIGH(251)
+    ; tmp16 already set
+    lcall GE16
+    jc  VT_invalid
+    setb c
+    ret
+VT_invalid:
+    clr c
+    ret
+
+Show_Invalid_Temp:
+    lcall LCD_Clear
+    Set_Cursor(1,1)
+    Send_Constant_String(#inv_msg)
+    lcall Wait1s
+    lcall LCD_Update
+    lcall LCD_ShowInput
+    ret
 
 ;=========================================================
-; Duty_From_DeltaT
-; Uses:
-;   target16 = T_target (peak temp, binary)
-;   tmp16    = T_measured (oven temp, binary)
-; Output:
-;   PWM_duty per table:
-;     ?T <= 0     -> 0
-;     <= 2        -> 5
-;     <= 5        -> 10
-;     <= 10       -> 25
-;     <= 20       -> 45
-;     <= 30       -> 70
-;     > 30        -> 100
+; SAVE PARAMS (with temp<=250 enforcement on temp pages)
+;=========================================================
+Save_Param:
+    mov a,param_index
+    cjne a,#0,SP1
+
+    ; SOAK TEMP validate
+    mov R0, #bcd
+    lcall PackedBCD3_to_Bin16_DATA
+    lcall Validate_Temp250
+    jnc SP_bad
+    mov soak_temp+0,bcd+0
+    mov soak_temp+1,bcd+1
+    ret
+
+SP1:
+    cjne a,#1,SP2
+    mov soak_time+0,bcd+0
+    mov soak_time+1,bcd+1
+    ret
+
+SP2:
+    cjne a,#2,SP3
+
+    ; PEAK TEMP validate
+    mov R0, #bcd
+    lcall PackedBCD3_to_Bin16_DATA
+    lcall Validate_Temp250
+    jnc SP_bad
+    mov reflow_temp+0,bcd+0
+    mov reflow_temp+1,bcd+1
+    ret
+
+SP3:
+    mov reflow_time+0,bcd+0
+    mov reflow_time+1,bcd+1
+    ret
+
+SP_bad:
+    lcall Show_Invalid_Temp
+    ret
+
+;=========================================================
+; SAVE DUTY (0..100)
+;=========================================================
+Save_Duty:
+    jb blank_flag, SD_zero
+    lcall Get_LSD3
+
+    mov a, R0
+    cjne a, #0, SD_h_nonzero
+    mov a, R1
+    mov b, #10
+    mul ab
+    add a, R2
+    mov PWM_duty, a
+    ret
+
+SD_h_nonzero:
+    cjne a, #1, SD_clamp100
+    mov a, R1
+    orl a, R2
+    jz SD_exact100
+SD_clamp100:
+    mov PWM_duty, #100
+    ret
+SD_exact100:
+    mov PWM_duty, #100
+    ret
+SD_zero:
+    mov PWM_duty, #0
+    ret
+
+;=========================================================
+; PWM setters
+;=========================================================
+Set_PWM_Off:   
+mov PWM_duty, #0    
+ret
+Set_PWM_Full:  
+mov PWM_duty, #100  
+ret
+Set_PWM_Low:   
+mov PWM_duty,#30   
+ret
+Set_PWM_Med:   
+mov PWM_duty,#60   
+ret
+
+;=========================================================
+; Duty_From_DeltaT (table)
 ;=========================================================
 Duty_From_DeltaT:
-    ; if measured >= target -> duty 0
     lcall GE16
     jnc DFDT_measured_lt_target
     mov PWM_duty, #0
     ret
-
 DFDT_measured_lt_target:
-    ; delta = target - measured (low byte enough for 0..300)
     mov a, target16+0
     clr c
     subb a, tmp16+0
-    mov R0, a                 ; R0 = ?T
+    mov R0, a
 
-    ; ?T <= 2 -> 5%
     mov a, R0
     clr c
     subb a, #2
@@ -728,7 +773,6 @@ DFDT_measured_lt_target:
     mov PWM_duty, #5
     ret
 DFDT_gt2:
-    ; ?T <= 5 -> 10%
     mov a, R0
     clr c
     subb a, #5
@@ -736,7 +780,6 @@ DFDT_gt2:
     mov PWM_duty, #10
     ret
 DFDT_gt5:
-    ; ?T <= 10 -> 25%
     mov a, R0
     clr c
     subb a, #10
@@ -744,7 +787,6 @@ DFDT_gt5:
     mov PWM_duty, #25
     ret
 DFDT_gt10:
-    ; ?T <= 20 -> 45%
     mov a, R0
     clr c
     subb a, #20
@@ -752,7 +794,6 @@ DFDT_gt10:
     mov PWM_duty, #45
     ret
 DFDT_gt20:
-    ; ?T <= 30 -> 70%
     mov a, R0
     clr c
     subb a, #30
@@ -763,27 +804,111 @@ DFDT_gt30:
     mov PWM_duty, #100
     ret
 
+;=========================================================
+; Temp_Stall_Check (once/sec) - disabled while paused/error screen
+;=========================================================
+Temp_Stall_Check:
+    mov a, ms_count+0
+    orl a, ms_count+1
+    jnz TSC_done
+
+    jb paused_flag, TSC_done
+    jb error_demo_flag, TSC_done
+
+    mov a, run_flag
+    jz  TSC_reset
+
+    mov a, oven_temp+0
+    cjne a, last_temp_L, TSC_changed
+    mov a, oven_temp+1
+    cjne a, last_temp_H, TSC_changed
+
+    inc temp_stall_secs
+    mov a, temp_stall_secs
+    cjne a, #STALL_LIMIT, TSC_done
+
+    ; enter error screen (not "stuck" error state)
+    setb error_demo_flag
+    mov err_hold_secs, #0           ; we’ll return immediately after beeps unless you want delay
+    mov run_flag, #0
+    clr paused_flag
+    mov state, #ERROR_STATE
+    lcall Set_PWM_Off
+    lcall Beep_Once
+    mov beep_count, #9
+    lcall Show_Error_Message
+    ret
+
+TSC_changed:
+    mov a, oven_temp+0
+    mov last_temp_L, a
+    mov a, oven_temp+1
+    mov last_temp_H, a
+    mov temp_stall_secs, #0
+    ret
+
+TSC_reset:
+    mov a, oven_temp+0
+    mov last_temp_L, a
+    mov a, oven_temp+1
+    mov last_temp_H, a
+    mov temp_stall_secs, #0
+
+TSC_done:
+    ret
+
+;=========================================================
+; Beep_On_State_Change
+;=========================================================
+Beep_On_State_Change:
+    mov a, state
+    cjne a, prev_state, BOSC_changed
+    ret
+BOSC_changed:
+    mov prev_state, a
+    lcall Beep_Once
+    mov beep_count, #0
+
+    mov a, state
+    cjne a, #COOL_STATE, BOSC_chk_err
+    mov a, reflow_beeped
+    jnz BOSC_done
+    mov beep_count, #4
+    ret
+
+BOSC_chk_err:
+    mov a, state
+    cjne a, #ERROR_STATE, BOSC_done
+    mov beep_count, #9
+BOSC_done:
+    ret
 
 ;=========================================================
 ; FSM_Control
+; - paused: PWM off, do not advance
 ;=========================================================
 FSM_Control:
+    jb paused_flag, FSM_pause_ret
+    jb error_demo_flag, FSM_pause_ret
+
     mov a, run_flag
     jnz FSM_go
     mov state, #0
     lcall Set_PWM_Off
     ret
 
+FSM_pause_ret:
+    lcall Set_PWM_Off
+    ret
+
 FSM_go:
     mov a, state
 
-; S0: IDLE
 FSM_s0:
     cjne a, #0, FSM_s1
     lcall Set_PWM_Off
     ret
 
-; S1: RAMP TO SOAK until oven_temp >= soak_temp
 FSM_s1:
     cjne a, #1, FSM_s2
     lcall Set_PWM_Full
@@ -805,7 +930,6 @@ FSM_s1:
 FSM_ret_s1:
     ret
 
-; S2: SOAK until seconds >= soak_time
 FSM_s2:
     cjne a, #2, FSM_s3
     lcall Set_PWM_Low
@@ -827,64 +951,43 @@ FSM_s2:
 FSM_ret_s2:
     ret
 
-; S3: RAMP TO PEAK
-; - Duty uses ?T table toward PEAK target
-; - As soon as oven reaches 217C, we enter REFLOW (state 4) and start reflow timer
 FSM_s3:
     cjne a, #3, FSM_s4
 
-    ; If oven_temp >= LIQUIDUS -> start REFLOW timing immediately
+    ; enter reflow when temp >= 217
     mov target16+0, #LOW(LIQUIDUS)
     mov target16+1, #HIGH(LIQUIDUS)
     mov tmp16+0, oven_temp+0
     mov tmp16+1, oven_temp+1
     lcall GE16
-    jnc FSM_s3_heat_to_peak         ; not yet at 217
+    jnc FSM_s3_heat_to_peak
 
-    ; reached 217: enter reflow timing state
     mov state, #4
     clr a
     mov seconds+0, a
     mov seconds+1, a
+    mov reflow_done_flag, #0
+    mov reflow_beeped, #0
     ret
 
 FSM_s3_heat_to_peak:
-    ; target16 = PEAK temp (reflow_temp)
     mov R0, #reflow_temp
     lcall PackedBCD3_to_Bin16_DATA
     mov target16+0, tmp16+0
     mov target16+1, tmp16+1
 
-    ; measured = oven_temp
     mov tmp16+0, oven_temp+0
     mov tmp16+1, oven_temp+1
-
-    ; duty per ?T table
     lcall Duty_From_DeltaT
     ret
 
-
-; S4: REFLOW (time above liquidus)
-; - Timer seconds counts here (reflow_time duration)
-; - While time not done:
-;     * always keep >=217
-;     * still allowed to rise toward PEAK using ?T table
-;     * once PEAK reached -> PWM=0 (coast); if it falls to 217 -> HOLD_DUTY
-; - When time done:
-;     * PWM=0
-;     * wait until oven <=217 then go COOLING
 FSM_s4:
     cjne a, #4, FSM_s4_not
     sjmp FSM_s4_code
-    
 FSM_s4_not:
-	ljmp FSM_s5
-FSM_s4_code:
+    ljmp FSM_s5
 
-    ;-----------------------------
-    ; check if reflow time is finished
-    ; target16 = reflow_time (seconds)
-    ;-----------------------------
+FSM_s4_code:
     mov R0, #reflow_time
     lcall PackedBCD3_to_Bin16_DATA
     mov target16+0, tmp16+0
@@ -895,13 +998,6 @@ FSM_s4_code:
     lcall GE16
     jc  FSM_s4_done
 
-    ;-----------------------------
-    ; time NOT done: control to satisfy:
-    ;   - never below 217
-    ;   - try to reach PEAK, but once PEAK reached -> 0%
-    ;-----------------------------
-
-    ; first: compare to PEAK target
     mov R0, #reflow_temp
     lcall PackedBCD3_to_Bin16_DATA
     mov target16+0, tmp16+0
@@ -910,35 +1006,30 @@ FSM_s4_code:
     mov tmp16+0, oven_temp+0
     mov tmp16+1, oven_temp+1
 
-    ; if oven >= PEAK -> duty 0 (coast)
     lcall GE16
     jnc FSM_s4_not_at_peak
     mov PWM_duty, #0
-    ; but if it has fallen to 217 or below, hold a small duty to stay at ~217
+
     mov target16+0, #LOW(LIQUIDUS)
     mov target16+1, #HIGH(LIQUIDUS)
     mov tmp16+0, oven_temp+0
     mov tmp16+1, oven_temp+1
     lcall GE16
-    jc FSM_s4_ret               ; still >=217, keep 0
+    jc FSM_s4_ret
     mov PWM_duty, #HOLD_DUTY
 FSM_s4_ret:
     ret
 
 FSM_s4_not_at_peak:
-    ; not at peak yet -> compute duty from ?T table toward PEAK
-    ; (target16/tmp16 already set for peak vs oven)
     lcall Duty_From_DeltaT
 
-    ; enforce >=217: if oven <217, make sure duty is at least HOLD_DUTY
     mov target16+0, #LOW(LIQUIDUS)
     mov target16+1, #HIGH(LIQUIDUS)
     mov tmp16+0, oven_temp+0
     mov tmp16+1, oven_temp+1
     lcall GE16
-    jc FSM_s4_ret2              ; oven >=217 ok
+    jc FSM_s4_ret2
 
-    ; oven <217: ensure duty >= HOLD_DUTY
     mov a, PWM_duty
     clr c
     subb a, #HOLD_DUTY
@@ -950,26 +1041,30 @@ FSM_s4_ret2:
     ret
 
 FSM_s4_done:
-    ; time done -> PWM off
     mov PWM_duty, #0
+    mov reflow_done_flag, #1
 
-    ; wait until oven <=217 then go cooling
+    mov a, reflow_beeped
+    jnz FSM_s4_done_wait
+    mov reflow_beeped, #1
+    lcall Beep_Once
+    mov beep_count, #4
+
+FSM_s4_done_wait:
     mov target16+0, #LOW(LIQUIDUS)
     mov target16+1, #HIGH(LIQUIDUS)
     mov tmp16+0, oven_temp+0
     mov tmp16+1, oven_temp+1
     lcall GE16
-    jc FSM_s4_done_wait          ; still >=217
+    jc FSM_s4_done_wait_ret
 
     mov state, #5
     clr a
     mov seconds+0, a
     mov seconds+1, a
-FSM_s4_done_wait:
+FSM_s4_done_wait_ret:
     ret
 
-
-; S5: COOLING (heater off) until oven_temp < 50 then stop
 FSM_s5:
     lcall Set_PWM_Off
 
@@ -979,7 +1074,7 @@ FSM_s5:
     mov tmp16+0, oven_temp+0
     mov tmp16+1, oven_temp+1
     lcall GE16
-    jc FSM_ret_s5          ; still >=50
+    jc FSM_ret_s5
 
     mov state, #0
     mov run_flag, #0
@@ -989,9 +1084,8 @@ FSM_s5:
 FSM_ret_s5:
     ret
 
-
 ;=========================================================
-; DEBUG: Convert oven_temp (binary) -> R0,R1,R2 digits
+; DEBUG: Bin16 -> 3 digits (for oven_temp)
 ;=========================================================
 Bin16_To_3Digits:
     mov tmp16+0, oven_temp+0
@@ -1036,9 +1130,8 @@ B16_tens_done:
     mov R2, tmp16+0
     ret
 
-
 ;=========================================================
-; DEBUG: HEX shows oven_temp decimal on HEX2..HEX0 (no leading zeros)
+; HEX_Show_OvenTemp
 ;=========================================================
 HEX_Show_OvenTemp:
     mov dptr,#T_7seg
@@ -1059,7 +1152,7 @@ HOT_tens:
     jz  HOT_t_blank
 HOT_t_show:
     mov a, R1
-    movc a, @a+dptr
+    movc a,@a+dptr
     mov HEX1, a
     sjmp HOT_units
 HOT_t_blank:
@@ -1067,16 +1160,15 @@ HOT_t_blank:
 
 HOT_units:
     mov a, R2
-    movc a, @a+dptr
+    movc a,@a+dptr
     mov HEX0, a
     mov HEX3,#0FFh
     mov HEX4,#0FFh
     mov HEX5,#0FFh
     ret
 
-
 ;=========================================================
-; RUN DISPLAY: State title on line 1 (no PROFILE READY while running)
+; LCD State Title
 ;=========================================================
 LCD_ShowStateTitle:
     mov a, state
@@ -1105,14 +1197,62 @@ SST4:
     Send_Constant_String(#s_reflow)
     ret
 SST5:
+    cjne a, #5, SST6
     Set_Cursor(1,1)
     Send_Constant_String(#s_cool)
     ret
-
+SST6:
+    Set_Cursor(1,1)
+    Send_Constant_String(#s_error)
+    ret
 
 ;=========================================================
-; RUN DISPLAY line 2: temperature "T:xxx"
+; Print run_time (last 3 digits) as " t:xyz"
 ;=========================================================
+RunTime_To_3Digits:
+    ; tmp16 = run_time
+    mov tmp16+0, run_time+0
+    mov tmp16+1, run_time+1
+
+    clr a
+    mov R4,a   ; hundreds
+    mov R5,a   ; tens
+    mov R6,a   ; ones
+
+RT_h:
+    mov target16+0,#100
+    mov target16+1,#0
+    lcall GE16
+    jnc RT_t
+    mov a,tmp16+0
+    clr c
+    subb a,#100
+    mov tmp16+0,a
+    mov a,tmp16+1
+    subb a,#0
+    mov tmp16+1,a
+    inc R4
+    sjmp RT_h
+
+RT_t:
+    mov target16+0,#10
+    mov target16+1,#0
+    lcall GE16
+    jnc RT_u
+    mov a,tmp16+0
+    clr c
+    subb a,#10
+    mov tmp16+0,a
+    mov a,tmp16+1
+    subb a,#0
+    mov tmp16+1,a
+    inc R5
+    sjmp RT_t
+
+RT_u:
+    mov R6,tmp16+0
+    ret
+
 LCD_ShowTempLine2:
     lcall LCD_ClearLine2
     Set_Cursor(2,1)
@@ -1125,105 +1265,115 @@ LCD_ShowTempLine2:
     lcall WriteDigitA
     mov a, R2
     lcall WriteDigitA
+
+    Send_Constant_String(#time_lbl)
+    lcall RunTime_To_3Digits
+    mov a, R4
+    lcall WriteDigitA
+    mov a, R5
+    lcall WriteDigitA
+    mov a, R6
+    lcall WriteDigitA
     ret
 
-
-;=========================================================
-; RUN DISPLAY line 2: duty "PWM:xxx%"
-;=========================================================
 LCD_ShowDutyLine2:
     lcall LCD_ClearLine2
     Set_Cursor(2,1)
     Send_Constant_String(#duty_lbl)
 
-    ; Convert PWM_duty (0..100) to digits R0,R1,R2
+    ; digits for PWM duty
     clr a
-    mov R0, a
-    mov R1, a
-    mov R2, a
-
+    mov R0,a
+    mov R1,a
+    mov R2,a
     mov a, PWM_duty
-    cjne a, #100, DUT_not100
-    mov R0, #1
-    mov R1, #0
-    mov R2, #0
+    cjne a,#100, DUT_not100
+    mov R0,#1
+    mov R1,#0
+    mov R2,#0
     sjmp DUT_print
-
 DUT_not100:
-    mov b, #10
-    div ab            ; A=tens, B=units
-    mov R1, a
-    mov R2, b
-    mov R0, #0
-
+    mov b,#10
+    div ab
+    mov R1,a
+    mov R2,b
+    mov R0,#0
 DUT_print:
-    ; print " xx" or "100"
-    mov a, R0
+    mov a,R0
     jnz DUT_pH
     WriteData(#' ')
     sjmp DUT_pT
 DUT_pH:
     lcall WriteDigitA
-
 DUT_pT:
-    mov a, R1
+    mov a,R1
     jnz DUT_pTshow
-    mov a, R0
+    mov a,R0
     jnz DUT_pTshow
     WriteData(#' ')
     sjmp DUT_pU
 DUT_pTshow:
-    mov a, R1
+    mov a,R1
     lcall WriteDigitA
-
 DUT_pU:
-    mov a, R2
+    mov a,R2
     lcall WriteDigitA
-
     Send_Constant_String(#pct_lbl)
+
+    Send_Constant_String(#time_lbl)
+    lcall RunTime_To_3Digits
+    mov a, R4
+    lcall WriteDigitA
+    mov a, R5
+    lcall WriteDigitA
+    mov a, R6
+    lcall WriteDigitA
     ret
 
+Show_Error_Message:
+    lcall LCD_Clear
+    Set_Cursor(1,1)
+    Send_Constant_String(#s_error)
+    Set_Cursor(2,1)
+    Send_Constant_String(#err_msg)
+    ret
 
-;=========================================================
-; Display_Status_All
-; - always: HEX shows oven_temp
-; - when running:
-;      line1 state title
-;      line2 temp (SW5=0) or duty (SW5=1)
-;=========================================================
 Display_Status_All:
     lcall HEX_Show_OvenTemp
 
+    ; show run/error UI when running OR in error screen
     mov a, run_flag
-    jz DSA_done
+    jnz DSA_show
+    jb error_demo_flag, DSA_show
+    mov a, state
+    cjne a, #ERROR_STATE, DSA_done
 
+DSA_show:
     lcall LCD_ShowStateTitle
-
     jb SW5, DSA_duty
     lcall LCD_ShowTempLine2
     sjmp DSA_done
 DSA_duty:
     lcall LCD_ShowDutyLine2
-
 DSA_done:
     ret
 
-
 ;=========================================================
-; DEBUG: Fake temperature generator (updates once per second)
+; Fake temperature generator (once/sec)
+; frozen while paused or error screen
 ;=========================================================
 Fake_OvenTemp_Update:
-    ; only update right after 1-second rollover (ms_count == 0)
     mov a, ms_count+0
     orl a, ms_count+1
     jnz FOT_done
 
-    ; not running: drift toward 25C
+    jb paused_flag, FOT_done
+    jb error_demo_flag, FOT_done
+
     mov a, run_flag
     jnz FOT_running
 
 FOT_idle:
-    ; if oven_temp == 25 do nothing
     mov a, oven_temp+0
     cjne a, #25, FOT_idle_checkdir
     mov a, oven_temp+1
@@ -1231,7 +1381,6 @@ FOT_idle:
     sjmp FOT_done
 
 FOT_idle_checkdir:
-    ; if oven_temp >= 25 cool by 1 else heat by 1
     mov target16+0, #25
     mov target16+1, #0
     mov tmp16+0, oven_temp+0
@@ -1248,34 +1397,27 @@ FOT_running:
     mov a, PWM_duty
     jz FOT_cool_fast
 
-    ; duty >= 60 => +6
     mov a, PWM_duty
     clr c
     subb a, #60
     jc FOT_heat_med
     lcall Temp_Add6
     sjmp FOT_clamp
-
 FOT_heat_med:
-    ; duty >= 30 => +3
     mov a, PWM_duty
     clr c
     subb a, #30
     jc FOT_heat_low
     lcall Temp_Add3
     sjmp FOT_clamp
-
 FOT_heat_low:
-    ; duty 1..29 => +1
     lcall Temp_Add1
     sjmp FOT_clamp
 
 FOT_cool_fast:
-    ; duty == 0 => -4
     lcall Temp_Sub4
 
 FOT_clamp:
-    ; clamp upper to 300
     mov target16+0, #LOW(300)
     mov target16+1, #HIGH(300)
     mov tmp16+0, oven_temp+0
@@ -1288,10 +1430,6 @@ FOT_clamp:
 FOT_done:
     ret
 
-
-;=========================================================
-; TEMP helpers (16-bit unsigned oven_temp)
-;=========================================================
 Temp_Add1:
     inc oven_temp+0
     mov a, oven_temp+0
@@ -1299,20 +1437,16 @@ Temp_Add1:
     inc oven_temp+1
 TA1_done:
     ret
-
 Temp_Add3:
     lcall Temp_Add1
     lcall Temp_Add1
     lcall Temp_Add1
     ret
-
 Temp_Add6:
     lcall Temp_Add3
     lcall Temp_Add3
     ret
-
 Temp_Sub1:
-    ; if oven_temp == 0 => stay 0
     mov a, oven_temp+0
     orl a, oven_temp+1
     jz TS1_done
@@ -1322,7 +1456,6 @@ Temp_Sub1:
     dec oven_temp+1
 TS1_done:
     ret
-
 Temp_Sub4:
     lcall Temp_Sub1
     lcall Temp_Sub1
@@ -1330,41 +1463,116 @@ Temp_Sub4:
     lcall Temp_Sub1
     ret
 
+;=========================================================
+; Return_To_Menu
+;=========================================================
+Return_To_Menu:
+    mov run_flag,#0
+    clr paused_flag
+    mov state,#0
+    clr error_demo_flag
+    mov error_flag,#0
+    mov beep_count,#0
+    mov temp_stall_secs,#0
+    clr duty_mode
+    mov param_index,#0
+    lcall Set_PWM_Off
+    lcall Clear_Input
+    lcall LCD_Update
+    lcall HEX_ShowInput
+    ret
 
 ;=========================================================
-; HANDLE KEYPAD INPUT (R7 keycode)
-; - Running: only Start/Stop key is acted on; other keys ignored
-; - Not running: normal editing works (* # digits) + Start/Stop works
+; Handle_Key (called only on "click" due to key_lock in main)
 ;=========================================================
 Handle_Key:
     mov a, R7
 
-    ; START/STOP (Row4 Col4)
-    cjne a, #KEY_START_BTN, HK_not_start
+    ; running time reset key '1' works anytime
+    cjne a, #KEY_TIME_RESET, HK0
+    clr a
+    mov run_time+0,a
+    mov run_time+1,a
+    ret
+HK0:
 
+    ; ERROR button B: 10 beeps + error screen then menu
+    cjne a, #KEY_ERR_BTN, HK_chk_stop
+    setb error_demo_flag
+    mov state,#ERROR_STATE
+    mov run_flag,#0
+    clr paused_flag
+    lcall Set_PWM_Off
+    lcall Show_Error_Message
+    lcall Beep_Once
+    mov beep_count,#9
+    ret
+
+HK_chk_stop:
+    ; STOP (C): click pauses IF running
+    cjne a, #KEY_STOP_BTN, HK_chk_start
+
+    mov a, run_flag
+    jz  HK_stop_exit_near      ; (near) can't jump directly to HK_done
+
+    jb  paused_flag, HK_stop_exit_near  ; already paused -> ignore click
+
+    setb paused_flag
+    lcall Set_PWM_Off
+    ret
+
+HK_stop_exit_near:
+    ljmp HK_done 
+
+HK_chk_start:
+    ; START (D):
+    cjne a, #KEY_START_BTN, HK_not_control
+
+    ; if error screen active -> return to menu
+    jb error_demo_flag, HK_clear_err_to_menu
+
+    ; if paused -> resume (do NOT reset state/time/temp)
+    jb paused_flag, HK_resume
+    sjmp HK_toggle_run
+
+HK_resume:
+    clr paused_flag
+    ret
+
+HK_clear_err_to_menu:
+    ; stop beeps after finishing naturally is fine, but user wants ability to reset now
+    lcall Return_To_Menu
+    ret
+
+HK_toggle_run:
     mov a, run_flag
     xrl a, #1
     mov run_flag, a
 
-    ; turning ON?
     jz HK_stopped
     mov state, #1
     clr a
-    mov seconds+0, a
-    mov seconds+1, a
-    lcall LCD_Clear          ; wipe PROFILE READY / edit UI
+    mov seconds+0,a
+    mov seconds+1,a
+    mov reflow_done_flag,#0
+    mov reflow_beeped,#0
+    mov temp_stall_secs,#0
+    clr paused_flag
+    lcall LCD_Clear
     ret
 
 HK_stopped:
-    ; stop manually -> idle + heater off
-    mov state, #0
+    mov state,#0
+    clr paused_flag
     lcall Set_PWM_Off
     ret
 
-HK_not_start:
-    ; if running, ignore everything else
+HK_not_control:
+    ; if running OR paused OR error screen -> ignore edits
     mov a, run_flag
     jnz HK_done
+    jb paused_flag, HK_done
+    jb error_demo_flag, HK_done
 
     ; ENTER (*)
     mov a, R7
@@ -1372,7 +1580,6 @@ HK_not_start:
     jb duty_mode, HK_save_duty
 
     lcall Save_Param
-
     mov a, param_index
     cjne a, #4, HK_inc
     lcall Clear_Input
@@ -1395,7 +1602,6 @@ HK_save_duty:
     ret
 
 HK_clear:
-    ; CLEAR (#)
     mov a, R7
     cjne a, #KEY_POUND, HK_digit
     lcall Clear_Input
@@ -1404,7 +1610,6 @@ HK_clear:
     ret
 
 HK_digit:
-    ; accept only 0..9
     mov a, R7
     cjne a, #0Ah, HK_maybe
     ret
@@ -1421,29 +1626,54 @@ HK_ok:
 HK_done:
     ret
 
-
 ;=========================================================
 ; MAIN
 ;=========================================================
 main:
     mov SP,#7Fh
 
-    ; set the pins to output (your original)
     mov P0MOD,#10101111b
     mov P1MOD,#10000010b
     mov P2MOD,#10000010b
 
-    ; defaults
     clr a
     mov param_index,a
     clr duty_mode
+    
+    mov a, LEDRA
+    clr a
+    mov LEDRA, a
+    setb LEDRA.5
 
-    mov state, #0
-    mov run_flag, #0
+    mov state,#0
+    mov prev_state,#0
+    mov run_flag,#0
 
-    ; start fake temp at room temp 25C
-    mov oven_temp+0, #25
-    mov oven_temp+1, #0
+    mov error_flag,#0
+    mov beep_count,#0
+    mov temp_stall_secs,#0
+    mov reflow_done_flag,#0
+    mov reflow_beeped,#0
+
+    clr paused_flag
+    clr error_demo_flag
+    mov err_hold_secs,#0
+
+    mov key_lock,#0
+    mov last_key,#0
+
+    ; temps
+    mov oven_temp+0,#25
+    mov oven_temp+1,#0
+    mov last_temp_L,#25
+    mov last_temp_H,#0
+
+    ; time
+    clr a
+    mov run_time+0,a
+    mov run_time+1,a
+    mov seconds+0,a
+    mov seconds+1,a
 
     lcall Clear_Input
     lcall Configure_Keypad_Pins
@@ -1460,14 +1690,15 @@ main:
 
 loop:
     ;=====================================================
-    ; UI mode selection ONLY when NOT running
-    ; - SW5 selects DUTY EDIT vs PARAM pages
+    ; SW5 behavior:
+    ;   - NOT running AND not error screen: SW5 toggles duty edit page
+    ;   - Running: SW5 just changes view (handled in Display_Status_All)
     ;=====================================================
     mov a, run_flag
     jnz SKIP_UI_MODE
+    jb error_demo_flag, SKIP_UI_MODE
 
     jb SW5, SW5_ON
-
 SW5_OFF:
     jb duty_mode, MODE_TO_PARAM
     sjmp SW5_DONE
@@ -1491,20 +1722,59 @@ SW5_DONE:
 SKIP_UI_MODE:
 
     ;=====================================================
-    ; Keypad
+    ; Keypad one-shot handling
     ;=====================================================
     lcall Keypad
     jnc NO_KEY
+
+    mov a, key_lock
+    jz  PROCESS_KEY
+    mov a, R7
+    cjne a, last_key, PROCESS_KEY
+    sjmp AFTER_KEY
+
+PROCESS_KEY:
+    mov key_lock,#1
+    mov a,R7
+    mov last_key,a
     lcall Handle_Key
+
+AFTER_KEY:
+    sjmp KEY_DONE
+
 NO_KEY:
+    mov key_lock,#0
+KEY_DONE:
 
     ;=====================================================
-    ; TEMP + FSM + DISPLAY
+    ; If error screen active: after beeps finish, return to menu
     ;=====================================================
-    lcall Fake_OvenTemp_Update      ; replace later with real temp update
-    lcall FSM_Control
+    jb error_demo_flag, ERR_SCREEN
+    sjmp RUN_NORMAL
+
+ERR_SCREEN:
+    ; allow beeps to drain
+    lcall Do_ExtraBeeps
+    mov a, beep_count
+    jnz SHOW_ONLY
+    ; done beeping -> return to menu
+    lcall Return_To_Menu
+SHOW_ONLY:
     lcall Display_Status_All
+    sjmp loop
 
+RUN_NORMAL:
+    ;=====================================================
+    ; TEMP + STALL + FSM + BEEPS + DISPLAY
+    ;=====================================================
+    lcall Fake_OvenTemp_Update
+    lcall Temp_Stall_Check
+    lcall FSM_Control
+
+    lcall Beep_On_State_Change
+    lcall Do_ExtraBeeps
+
+    lcall Display_Status_All
     sjmp loop
 
 END
