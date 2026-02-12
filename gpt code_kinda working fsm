@@ -4,13 +4,51 @@ $LIST
 
 ;=========================================================
 ; REFLOW OVEN CONTROLLER (DE10-Lite CV-8052) - SINGLE FILE
-; - Keypad sets: soak temp/time, reflow temp/time (packed BCD)
-; - SW5 toggles to PWM duty edit page (0..100%)
-; - Timer2 = 1kHz ISR drives PWM + creates 1-second timebase
-; - FSM auto-advances states using your set temps/times and oven_temp
-; - DEBUG MODE: Fake oven temperature generator so you can SEE FSM moving
-;   (prints state+temp on LCD line 2 and temp on HEX2..HEX0)
 ;=========================================================
+; UI (when NOT running):
+;   - Keypad sets profile params (packed BCD): soak temp/time, peak temp, reflow time
+;   - Pages: 0..3 editing, Page 4 shows "PROFILE READY"
+;   - SW5 selects DUTY EDIT page (0..100%) and you can still set PWM duty
+;   - Digits 0..9 type into 3-digit field
+;   - * = ENTER/save, # = CLEAR input
+;
+; RUN (when running):
+;   - Start/Stop button = Row4 Col4 keypad key (KEY_START_BTN)
+;   - LCD Line 1: STATE TITLE only (no profile text)
+;   - LCD Line 2:
+;        SW5=0 -> shows Temperature "T:xxx"
+;        SW5=1 -> shows Duty "PWM:xxx%"
+;   - HEX2..HEX0 always show oven temperature (decimal)
+;
+; Timers:
+;   - Timer2 = 1kHz ISR:
+;        * Generates PWM on P2.7 from PWM_duty (0..100)
+;        * Builds 1-second counter in 'seconds'
+;   - Timer0 = square-wave audio (kept from your original)
+;
+; FSM states (matches your diagram labels):
+;   0 IDLE
+;   1 RAMP TO SOAK      (full power until oven >= soak_temp)
+;   2 SOAK             (low power until seconds >= soak_time)
+;   3 RAMP TO PEAK      (use ?T table toward peak; when reach 217C -> start REFLOW time)
+;   4 REFLOW            (reflow time counts here; must remain >=217C; still allowed to rise to peak)
+;   5 COOLING           (heater off; cool to 50C then stop)
+;
+; IMPORTANT (your request):
+;   - Reflow time starts as soon as oven reaches 217C (LIQUIDUS)
+;   - While in REFLOW (state 4) and time not done:
+;       * keep oven >=217C
+;       * continue heating toward peak using ?T table until peak reached
+;       * once peak reached, PWM goes 0% (coast). If it falls to 217C, hold 5-10% duty.
+;   - After reflow time done:
+;       * PWM = 0%
+;       * wait until oven <=217C, then go to COOLING (state 5)
+;
+; DEBUG TEMP:
+;   - Fake_OvenTemp_Update updates oven_temp once per second using PWM_duty
+;   - Replace Fake_OvenTemp_Update later with real sensor code
+;=========================================================
+
 
 ;=========================================================
 ; CLOCK + TIMERS
@@ -26,9 +64,15 @@ TIMER2_RELOAD EQU ((65536-(CLK/(12*TIMER2_RATE))))
 SOUND_OUT     EQU P2.1
 PWM           EQU P2.7
 
-KEY_START_1   EQU 0x01      ; key '1' start/stop toggle
 KEY_STAR      EQU 0x0E      ; *
 KEY_POUND     EQU 0x0F      ; #
+
+;---------------------------------------------------------
+; START/STOP button = Row4 Col4 on keypad
+; NOTE: This keycode depends on your Read_keypad.inc mapping.
+; Commonly Row4 Col4 ("D") is 0x0D. If yours differs, change only this.
+;---------------------------------------------------------
+KEY_START_BTN EQU 0x0D
 
 ; LCD value field start column (after "SOAK Tmp: ")
 VALUE_COL     EQU 11        ; value occupies col 11..13
@@ -37,7 +81,14 @@ VALUE_COL     EQU 11        ; value occupies col 11..13
 ; DUTY-CYCLE EDIT MODE SWITCH
 ; NOTE: If your switch symbol isn't SWA, change this line
 ;=========================================================
-SW5           EQU SWA.5     ; SW[5] on DE10-Lite (adjust if your SFR name differs)
+SW5           EQU SWA.5
+
+;=========================================================
+; REFLOW LIQUIDUS CONSTRAINT + HOLD DUTY
+;=========================================================
+LIQUIDUS      EQU 217
+HOLD_DUTY     EQU 8          ; 5-10% keepalive at 217 barrier
+
 
 ;=========================================================
 ; VECTORS
@@ -48,6 +99,7 @@ org 0x000B
     ljmp Timer0_ISR
 org 0x002B
     ljmp Timer2_ISR
+
 
 ;=========================================================
 ; DATA
@@ -61,8 +113,8 @@ param_index:  ds 1          ; 0..4
 
 soak_temp:    ds 2          ; packed BCD (3 digits) in 2 bytes
 soak_time:    ds 2
-reflow_temp:  ds 2
-reflow_time:  ds 2
+reflow_temp:  ds 2          ; used as PEAK TEMP target
+reflow_time:  ds 2          ; used as REFLOW TIME duration (time above liquidus)
 
 ;-----------------------------
 ; FSM DATA
@@ -80,9 +132,10 @@ target16:     ds 2          ; scratch 16-bit
 
 bseg
 blank_flag:   dbit 1         ; 1 = nothing typed yet
-duty_mode:    dbit 1         ; 1 = SW5 duty edit page active
+duty_mode:    dbit 1         ; 1 = SW5 duty edit page active (ONLY when NOT running)
 
 cseg
+
 
 ;=========================================================
 ; LCD WIRING
@@ -99,20 +152,32 @@ $include(LCD_4bit_DE10Lite_no_RW.inc)
 $include(Read_keypad.inc)
 $LIST
 
+
 ;=========================================================
-; STRINGS
+; STRINGS (<=16 chars for full row)
 ;=========================================================
 soaktemp_str:    db 'SOAK Tmp: ',0
 soaktime_str:    db 'SOAK time:',0
-reflowtemp_str:  db 'REFL Tmp: ',0
+reflowtemp_str:  db 'PEAK Tmp: ',0
 reflowtime_str:  db 'REFL time:',0
 profile_ready:   db 'PROFILE READY',0
 pwm_str:         db 'PWM Duty: ',0
+
 help_str:        db '0-999*=ENT#=CLR',0
 
-; DEBUG status line 2
-st_str:          db 'ST:',0
-t_str:           db ' T:',0
+; RUN display (line 1)
+s_idle:          db 'IDLE            ',0
+s_ramp_soak:     db 'RAMP TO SOAK    ',0
+s_soak:          db 'SOAK            ',0
+s_ramp_peak:     db 'RAMP TO PEAK    ',0
+s_reflow:        db 'REFLOW          ',0
+s_cool:          db 'COOLING         ',0
+
+; RUN display (line 2)
+temp_lbl:        db 'T:',0
+duty_lbl:        db 'PWM:',0
+pct_lbl:         db '%',0
+
 
 ;=========================================================
 ; 7SEG TABLE
@@ -120,6 +185,7 @@ t_str:           db ' T:',0
 T_7seg:
     DB 0xC0,0xF9,0xA4,0xB0,0x99
     DB 0x92,0x82,0xF8,0x80,0x90
+
 
 ;=========================================================
 ; TIMER0 (SQUARE WAVE AUDIO)
@@ -138,9 +204,9 @@ Timer0_ISR:
     cpl SOUND_OUT
     reti
 
+
 ;=========================================================
 ; TIMER2 (1kHz ISR) + PWM (0..100%) + 1-second timebase
-; PWM_duty = 0..100
 ;=========================================================
 Timer2_Init:
     mov T2CON,#0
@@ -152,7 +218,6 @@ Timer2_Init:
     mov PWM_counter,#0
     mov PWM_duty,#0
 
-    ; timebase init
     clr a
     mov ms_count+0,a
     mov ms_count+1,a
@@ -207,12 +272,10 @@ T2_ms_nocarry:
     mov a, ms_count+1
     cjne a, #HIGH(1000), T2_exit_time
 
-    ; ms_count = 0
     clr a
     mov ms_count+0, a
     mov ms_count+1, a
 
-    ; seconds++
     inc seconds+0
     mov a, seconds+0
     jnz T2_exit_time
@@ -222,6 +285,7 @@ T2_exit_time:
     pop psw
     pop acc
     reti
+
 
 ;=========================================================
 ; INPUT HELPERS
@@ -235,6 +299,7 @@ Clear_Input:
     mov bcd+4,a
     setb blank_flag
     ret
+
 
 ;=========================================================
 ; LCD HELPERS
@@ -259,6 +324,7 @@ L2C1:
     djnz R0,L2C1
     ret
 
+
 ;=========================================================
 ; GET LSD 3 DIGITS FROM BCD INTO R0/R1/R2
 ; R0=hundreds, R1=tens, R2=units
@@ -277,6 +343,7 @@ Get_LSD3:
     anl a,#0Fh
     mov R0,a
     ret
+
 
 ;=========================================================
 ; WriteDigitA: prints A (0..9) as ASCII on LCD
@@ -312,6 +379,7 @@ WD8: cjne a,#8,WD9
 WD9:
     WriteData(#'9')
     ret
+
 
 ;=========================================================
 ; LCD_ShowInput: right-aligned 3-char field
@@ -353,6 +421,7 @@ LSI_3:
 
 LSI_done:
     ret
+
 
 ;=========================================================
 ; HEX_ShowInput (HEX2 HEX1 HEX0) no leading zeros
@@ -402,9 +471,10 @@ HX_blank:
     mov HEX5,#0FFh
     ret
 
+
 ;=========================================================
-; LCD_Update screens for each parameter
-; If duty_mode=1, show PWM Duty page instead
+; LCD_Update screens for each parameter (ONLY when NOT running)
+; If duty_mode=1, show PWM Duty edit page instead
 ;=========================================================
 LCD_Update:
     lcall LCD_Clear
@@ -460,6 +530,7 @@ L4y:
     Send_Constant_String(#profile_ready)
     ret
 
+
 ;=========================================================
 ; SAVE PARAMS (from typed bcd)
 ;=========================================================
@@ -483,6 +554,7 @@ s3:
     mov reflow_time+0,bcd+0
     mov reflow_time+1,bcd+1
     ret
+
 
 ;=========================================================
 ; SAVE DUTY (0..100) from typed digits (clamp >100)
@@ -518,21 +590,23 @@ SD_zero:
     mov PWM_duty, #0
     ret
 
+
 ;=========================================================
 ; PWM SETTERS (used by FSM)
 ;=========================================================
-Set_PWM_Off:  
+Set_PWM_Off:   
 mov PWM_duty, #0    
 ret
-Set_PWM_Full: 
+Set_PWM_Full:  
 mov PWM_duty, #100  
 ret
-Set_PWM_Low:  
+Set_PWM_Low:   
 mov PWM_duty, #30   
 ret
-Set_PWM_Med:  
+Set_PWM_Med:   
 mov PWM_duty, #60   
 ret
+
 
 ;=========================================================
 ; PackedBCD3_to_Bin16_DATA
@@ -592,6 +666,7 @@ PackedBCD3_to_Bin16_DATA:
     pop 0
     ret
 
+
 ;=========================================================
 ; GE16: C=1 if (tmp16 >= target16) else C=0
 ;=========================================================
@@ -615,10 +690,82 @@ GE16_no:
     pop acc
     ret
 
+
+;=========================================================
+; Duty_From_DeltaT
+; Uses:
+;   target16 = T_target (peak temp, binary)
+;   tmp16    = T_measured (oven temp, binary)
+; Output:
+;   PWM_duty per table:
+;     ?T <= 0     -> 0
+;     <= 2        -> 5
+;     <= 5        -> 10
+;     <= 10       -> 25
+;     <= 20       -> 45
+;     <= 30       -> 70
+;     > 30        -> 100
+;=========================================================
+Duty_From_DeltaT:
+    ; if measured >= target -> duty 0
+    lcall GE16
+    jnc DFDT_measured_lt_target
+    mov PWM_duty, #0
+    ret
+
+DFDT_measured_lt_target:
+    ; delta = target - measured (low byte enough for 0..300)
+    mov a, target16+0
+    clr c
+    subb a, tmp16+0
+    mov R0, a                 ; R0 = ?T
+
+    ; ?T <= 2 -> 5%
+    mov a, R0
+    clr c
+    subb a, #2
+    jnc DFDT_gt2
+    mov PWM_duty, #5
+    ret
+DFDT_gt2:
+    ; ?T <= 5 -> 10%
+    mov a, R0
+    clr c
+    subb a, #5
+    jnc DFDT_gt5
+    mov PWM_duty, #10
+    ret
+DFDT_gt5:
+    ; ?T <= 10 -> 25%
+    mov a, R0
+    clr c
+    subb a, #10
+    jnc DFDT_gt10
+    mov PWM_duty, #25
+    ret
+DFDT_gt10:
+    ; ?T <= 20 -> 45%
+    mov a, R0
+    clr c
+    subb a, #20
+    jnc DFDT_gt20
+    mov PWM_duty, #45
+    ret
+DFDT_gt20:
+    ; ?T <= 30 -> 70%
+    mov a, R0
+    clr c
+    subb a, #30
+    jnc DFDT_gt30
+    mov PWM_duty, #70
+    ret
+DFDT_gt30:
+    mov PWM_duty, #100
+    ret
+
+
 ;=========================================================
 ; FSM_Control
-; - uses: soak_temp/time, reflow_temp/time (packed BCD)
-; - uses: oven_temp (binary °C)
 ;=========================================================
 FSM_Control:
     mov a, run_flag
@@ -658,7 +805,7 @@ FSM_s1:
 FSM_ret_s1:
     ret
 
-; S2: SOAK HOLD until seconds >= soak_time
+; S2: SOAK until seconds >= soak_time
 FSM_s2:
     cjne a, #2, FSM_s3
     lcall Set_PWM_Low
@@ -680,33 +827,64 @@ FSM_s2:
 FSM_ret_s2:
     ret
 
-; S3: RAMP TO REFLOW until oven_temp >= reflow_temp
+; S3: RAMP TO PEAK
+; - Duty uses ?T table toward PEAK target
+; - As soon as oven reaches 217C, we enter REFLOW (state 4) and start reflow timer
 FSM_s3:
     cjne a, #3, FSM_s4
-    lcall Set_PWM_Full
 
+    ; If oven_temp >= LIQUIDUS -> start REFLOW timing immediately
+    mov target16+0, #LOW(LIQUIDUS)
+    mov target16+1, #HIGH(LIQUIDUS)
+    mov tmp16+0, oven_temp+0
+    mov tmp16+1, oven_temp+1
+    lcall GE16
+    jnc FSM_s3_heat_to_peak         ; not yet at 217
+
+    ; reached 217: enter reflow timing state
+    mov state, #4
+    clr a
+    mov seconds+0, a
+    mov seconds+1, a
+    ret
+
+FSM_s3_heat_to_peak:
+    ; target16 = PEAK temp (reflow_temp)
     mov R0, #reflow_temp
     lcall PackedBCD3_to_Bin16_DATA
     mov target16+0, tmp16+0
     mov target16+1, tmp16+1
 
+    ; measured = oven_temp
     mov tmp16+0, oven_temp+0
     mov tmp16+1, oven_temp+1
-    lcall GE16
-    jnc FSM_ret_s3
 
-    mov state, #4
-    clr a
-    mov seconds+0, a
-    mov seconds+1, a
-FSM_ret_s3:
+    ; duty per ?T table
+    lcall Duty_From_DeltaT
     ret
 
-; S4: REFLOW HOLD until seconds >= reflow_time
-FSM_s4:
-    cjne a, #4, FSM_s5
-    lcall Set_PWM_Med
 
+; S4: REFLOW (time above liquidus)
+; - Timer seconds counts here (reflow_time duration)
+; - While time not done:
+;     * always keep >=217
+;     * still allowed to rise toward PEAK using ?T table
+;     * once PEAK reached -> PWM=0 (coast); if it falls to 217 -> HOLD_DUTY
+; - When time done:
+;     * PWM=0
+;     * wait until oven <=217 then go COOLING
+FSM_s4:
+    cjne a, #4, FSM_s4_not
+    sjmp FSM_s4_code
+    
+FSM_s4_not:
+	ljmp FSM_s5
+FSM_s4_code:
+
+    ;-----------------------------
+    ; check if reflow time is finished
+    ; target16 = reflow_time (seconds)
+    ;-----------------------------
     mov R0, #reflow_time
     lcall PackedBCD3_to_Bin16_DATA
     mov target16+0, tmp16+0
@@ -715,16 +893,83 @@ FSM_s4:
     mov tmp16+0, seconds+0
     mov tmp16+1, seconds+1
     lcall GE16
-    jnc FSM_ret_s4
+    jc  FSM_s4_done
+
+    ;-----------------------------
+    ; time NOT done: control to satisfy:
+    ;   - never below 217
+    ;   - try to reach PEAK, but once PEAK reached -> 0%
+    ;-----------------------------
+
+    ; first: compare to PEAK target
+    mov R0, #reflow_temp
+    lcall PackedBCD3_to_Bin16_DATA
+    mov target16+0, tmp16+0
+    mov target16+1, tmp16+1
+
+    mov tmp16+0, oven_temp+0
+    mov tmp16+1, oven_temp+1
+
+    ; if oven >= PEAK -> duty 0 (coast)
+    lcall GE16
+    jnc FSM_s4_not_at_peak
+    mov PWM_duty, #0
+    ; but if it has fallen to 217 or below, hold a small duty to stay at ~217
+    mov target16+0, #LOW(LIQUIDUS)
+    mov target16+1, #HIGH(LIQUIDUS)
+    mov tmp16+0, oven_temp+0
+    mov tmp16+1, oven_temp+1
+    lcall GE16
+    jc FSM_s4_ret               ; still >=217, keep 0
+    mov PWM_duty, #HOLD_DUTY
+FSM_s4_ret:
+    ret
+
+FSM_s4_not_at_peak:
+    ; not at peak yet -> compute duty from ?T table toward PEAK
+    ; (target16/tmp16 already set for peak vs oven)
+    lcall Duty_From_DeltaT
+
+    ; enforce >=217: if oven <217, make sure duty is at least HOLD_DUTY
+    mov target16+0, #LOW(LIQUIDUS)
+    mov target16+1, #HIGH(LIQUIDUS)
+    mov tmp16+0, oven_temp+0
+    mov tmp16+1, oven_temp+1
+    lcall GE16
+    jc FSM_s4_ret2              ; oven >=217 ok
+
+    ; oven <217: ensure duty >= HOLD_DUTY
+    mov a, PWM_duty
+    clr c
+    subb a, #HOLD_DUTY
+    jc  FSM_s4_force_hold
+    ret
+FSM_s4_force_hold:
+    mov PWM_duty, #HOLD_DUTY
+FSM_s4_ret2:
+    ret
+
+FSM_s4_done:
+    ; time done -> PWM off
+    mov PWM_duty, #0
+
+    ; wait until oven <=217 then go cooling
+    mov target16+0, #LOW(LIQUIDUS)
+    mov target16+1, #HIGH(LIQUIDUS)
+    mov tmp16+0, oven_temp+0
+    mov tmp16+1, oven_temp+1
+    lcall GE16
+    jc FSM_s4_done_wait          ; still >=217
 
     mov state, #5
     clr a
     mov seconds+0, a
     mov seconds+1, a
-FSM_ret_s4:
+FSM_s4_done_wait:
     ret
 
-; S5: COOL (heater off) until oven_temp < 50 then stop
+
+; S5: COOLING (heater off) until oven_temp < 50 then stop
 FSM_s5:
     lcall Set_PWM_Off
 
@@ -733,12 +978,9 @@ FSM_s5:
 
     mov tmp16+0, oven_temp+0
     mov tmp16+1, oven_temp+1
-
-    ; if oven_temp >= 50 keep cooling
     lcall GE16
-    jc FSM_ret_s5
+    jc FSM_ret_s5          ; still >=50
 
-    ; else done
     mov state, #0
     mov run_flag, #0
     clr a
@@ -747,9 +989,9 @@ FSM_s5:
 FSM_ret_s5:
     ret
 
+
 ;=========================================================
 ; DEBUG: Convert oven_temp (binary) -> R0,R1,R2 digits
-; R0=hundreds, R1=tens, R2=units
 ;=========================================================
 Bin16_To_3Digits:
     mov tmp16+0, oven_temp+0
@@ -794,6 +1036,7 @@ B16_tens_done:
     mov R2, tmp16+0
     ret
 
+
 ;=========================================================
 ; DEBUG: HEX shows oven_temp decimal on HEX2..HEX0 (no leading zeros)
 ;=========================================================
@@ -831,19 +1074,49 @@ HOT_units:
     mov HEX5,#0FFh
     ret
 
+
 ;=========================================================
-; DEBUG: LCD line2 shows "ST:x T:yyy"
+; RUN DISPLAY: State title on line 1 (no PROFILE READY while running)
 ;=========================================================
-LCD_ShowStatus:
+LCD_ShowStateTitle:
+    mov a, state
+    cjne a, #0, SST1
+    Set_Cursor(1,1)
+    Send_Constant_String(#s_idle)
+    ret
+SST1:
+    cjne a, #1, SST2
+    Set_Cursor(1,1)
+    Send_Constant_String(#s_ramp_soak)
+    ret
+SST2:
+    cjne a, #2, SST3
+    Set_Cursor(1,1)
+    Send_Constant_String(#s_soak)
+    ret
+SST3:
+    cjne a, #3, SST4
+    Set_Cursor(1,1)
+    Send_Constant_String(#s_ramp_peak)
+    ret
+SST4:
+    cjne a, #4, SST5
+    Set_Cursor(1,1)
+    Send_Constant_String(#s_reflow)
+    ret
+SST5:
+    Set_Cursor(1,1)
+    Send_Constant_String(#s_cool)
+    ret
+
+
+;=========================================================
+; RUN DISPLAY line 2: temperature "T:xxx"
+;=========================================================
+LCD_ShowTempLine2:
     lcall LCD_ClearLine2
     Set_Cursor(2,1)
-    Send_Constant_String(#st_str)
-
-    mov a, state
-    add a, #'0'
-    WriteData(acc)
-
-    Send_Constant_String(#t_str)
+    Send_Constant_String(#temp_lbl)
 
     lcall Bin16_To_3Digits
     mov a, R0
@@ -854,15 +1127,90 @@ LCD_ShowStatus:
     lcall WriteDigitA
     ret
 
-Display_Status_All:
-    lcall LCD_ShowStatus
-    lcall HEX_Show_OvenTemp
+
+;=========================================================
+; RUN DISPLAY line 2: duty "PWM:xxx%"
+;=========================================================
+LCD_ShowDutyLine2:
+    lcall LCD_ClearLine2
+    Set_Cursor(2,1)
+    Send_Constant_String(#duty_lbl)
+
+    ; Convert PWM_duty (0..100) to digits R0,R1,R2
+    clr a
+    mov R0, a
+    mov R1, a
+    mov R2, a
+
+    mov a, PWM_duty
+    cjne a, #100, DUT_not100
+    mov R0, #1
+    mov R1, #0
+    mov R2, #0
+    sjmp DUT_print
+
+DUT_not100:
+    mov b, #10
+    div ab            ; A=tens, B=units
+    mov R1, a
+    mov R2, b
+    mov R0, #0
+
+DUT_print:
+    ; print " xx" or "100"
+    mov a, R0
+    jnz DUT_pH
+    WriteData(#' ')
+    sjmp DUT_pT
+DUT_pH:
+    lcall WriteDigitA
+
+DUT_pT:
+    mov a, R1
+    jnz DUT_pTshow
+    mov a, R0
+    jnz DUT_pTshow
+    WriteData(#' ')
+    sjmp DUT_pU
+DUT_pTshow:
+    mov a, R1
+    lcall WriteDigitA
+
+DUT_pU:
+    mov a, R2
+    lcall WriteDigitA
+
+    Send_Constant_String(#pct_lbl)
     ret
+
+
+;=========================================================
+; Display_Status_All
+; - always: HEX shows oven_temp
+; - when running:
+;      line1 state title
+;      line2 temp (SW5=0) or duty (SW5=1)
+;=========================================================
+Display_Status_All:
+    lcall HEX_Show_OvenTemp
+
+    mov a, run_flag
+    jz DSA_done
+
+    lcall LCD_ShowStateTitle
+
+    jb SW5, DSA_duty
+    lcall LCD_ShowTempLine2
+    sjmp DSA_done
+DSA_duty:
+    lcall LCD_ShowDutyLine2
+
+DSA_done:
+    ret
+
 
 ;=========================================================
 ; DEBUG: Fake temperature generator (updates once per second)
-; - Heats based on PWM_duty, cools when PWM_duty=0
-; - Clamped 0..300
 ;=========================================================
 Fake_OvenTemp_Update:
     ; only update right after 1-second rollover (ms_count == 0)
@@ -940,6 +1288,7 @@ FOT_clamp:
 FOT_done:
     ret
 
+
 ;=========================================================
 ; TEMP helpers (16-bit unsigned oven_temp)
 ;=========================================================
@@ -981,37 +1330,51 @@ Temp_Sub4:
     lcall Temp_Sub1
     ret
 
+
 ;=========================================================
 ; HANDLE KEYPAD INPUT (R7 keycode)
-; - KEY 1 toggles run/stop (FSM)
-; - If duty_mode=1, ENTER(*) saves PWM duty instead of params
+; - Running: only Start/Stop key is acted on; other keys ignored
+; - Not running: normal editing works (* # digits) + Start/Stop works
 ;=========================================================
 Handle_Key:
-    mov a,R7
+    mov a, R7
 
-    ; START/STOP (key 1)
-    cjne a,#KEY_START_1, HK_enter
+    ; START/STOP (Row4 Col4)
+    cjne a, #KEY_START_BTN, HK_not_start
+
     mov a, run_flag
     xrl a, #1
     mov run_flag, a
 
-    ; if turning ON -> go to state 1 and reset seconds
-    jz HK_start_done
+    ; turning ON?
+    jz HK_stopped
     mov state, #1
     clr a
     mov seconds+0, a
     mov seconds+1, a
-HK_start_done:
+    lcall LCD_Clear          ; wipe PROFILE READY / edit UI
     ret
 
-HK_enter:
+HK_stopped:
+    ; stop manually -> idle + heater off
+    mov state, #0
+    lcall Set_PWM_Off
+    ret
+
+HK_not_start:
+    ; if running, ignore everything else
+    mov a, run_flag
+    jnz HK_done
+
     ; ENTER (*)
-    cjne a,#KEY_STAR,HK_clear
+    mov a, R7
+    cjne a, #KEY_STAR, HK_clear
     jb duty_mode, HK_save_duty
 
     lcall Save_Param
-    mov a,param_index
-    cjne a,#4,HK_inc
+
+    mov a, param_index
+    cjne a, #4, HK_inc
     lcall Clear_Input
     lcall LCD_Update
     lcall HEX_ShowInput
@@ -1032,7 +1395,9 @@ HK_save_duty:
     ret
 
 HK_clear:
-    cjne a,#KEY_POUND,HK_digit
+    ; CLEAR (#)
+    mov a, R7
+    cjne a, #KEY_POUND, HK_digit
     lcall Clear_Input
     lcall LCD_ShowInput
     lcall HEX_ShowInput
@@ -1040,8 +1405,8 @@ HK_clear:
 
 HK_digit:
     ; accept only 0..9
-    mov a,R7
-    cjne a,#0Ah,HK_maybe
+    mov a, R7
+    cjne a, #0Ah, HK_maybe
     ret
 HK_maybe:
     jc HK_ok
@@ -1052,6 +1417,10 @@ HK_ok:
     lcall LCD_ShowInput
     lcall HEX_ShowInput
     ret
+
+HK_done:
+    ret
+
 
 ;=========================================================
 ; MAIN
@@ -1091,8 +1460,12 @@ main:
 
 loop:
     ;=====================================================
-    ; SW5 selects DUTY MODE (1) vs PARAM MODE (0)
+    ; UI mode selection ONLY when NOT running
+    ; - SW5 selects DUTY EDIT vs PARAM pages
     ;=====================================================
+    mov a, run_flag
+    jnz SKIP_UI_MODE
+
     jb SW5, SW5_ON
 
 SW5_OFF:
@@ -1115,6 +1488,7 @@ MODE_TO_DUTY:
     lcall HEX_ShowInput
 
 SW5_DONE:
+SKIP_UI_MODE:
 
     ;=====================================================
     ; Keypad
@@ -1125,9 +1499,9 @@ SW5_DONE:
 NO_KEY:
 
     ;=====================================================
-    ; DEBUG TEMP + FSM + DISPLAY (LCD + HEX)
+    ; TEMP + FSM + DISPLAY
     ;=====================================================
-    lcall Fake_OvenTemp_Update
+    lcall Fake_OvenTemp_Update      ; replace later with real temp update
     lcall FSM_Control
     lcall Display_Status_All
 
