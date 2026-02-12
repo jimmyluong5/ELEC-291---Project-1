@@ -83,7 +83,7 @@ myLUT:
 
 Wait50ms:
 ;33.33MHz, 1 clk per cycle: 0.03us
-	mov R0, #30
+	mov R0, #150
 Wait50ms_L3:
 	mov R1, #74
 Wait50ms_L2:
@@ -135,26 +135,23 @@ Display_Oven_Serial:
 	mov a, bcd+1
 	swap a
 	anl a, #0FH
-	orl a, #'0'
+	add a, #30h
 	lcall putchar
 	
 	mov a, bcd+1
 	anl a, #0FH
-	orl a, #'0'
+	add a, #30h
 	lcall putchar
 	
-	mov a, #'.'
-	lcall putchar
-
 	mov a, bcd+0
 	swap a
 	anl a, #0FH
-	orl a, #'0'
+	add a, #30h
 	lcall putchar
 	
 	mov a, bcd+0
 	anl a, #0FH
-	orl a, #'0'
+	add a, #30h
 	lcall putchar
 
 	mov a, #'\r'
@@ -271,7 +268,7 @@ mov ov_temp+2, x+2
 mov ov_temp+3, x+3
 
 lcall hex2bcd
-
+lcall Display_Oven_Serial
 ; Display Logic
 Set_Cursor(2, 13)
 Display_BCD(bcd+1)
@@ -335,6 +332,8 @@ forever:
 	mov y+3, #0
 	lcall div32
 	
+	lcall Wait50ms
+	
 	mov ADC_C, #0x0
 	; Load 32-bit 'x' with 12-bit adc result
 	lcall get_adc
@@ -346,16 +345,15 @@ forever:
 	
 	lcall hex2bcd
 	lcall Display_Voltage_LCD
+
+	lcall Wait50ms
 	;lcall bcd2hex
 	mov ADC_C, #0x1
 	lcall get_adc
 	
 	;lcall Display_Voltage_Serial
 	lcall Display_Oven_Temp
-	lcall Display_Oven_Serial
-	lcall Display_Voltage_7seg
-	lcall Wait50ms
-	lcall Wait50ms
+	;lcall Display_Voltage_7seg
 	ljmp forever
 	
 end
