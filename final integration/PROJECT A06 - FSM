@@ -70,6 +70,9 @@ LIQUIDUS        EQU 217
 HOLD_DUTY       EQU 8
 MAX_TEMP        EQU 250
 STALL_LIMIT     EQU 60
+SOAK_BAND       EQU 3      ; +/- 3°C window
+SOAK_PULSE_DUTY EQU 10     ; heat pulses at 10%
+
 
 ;=========================================================
 ; STATES
@@ -141,7 +144,7 @@ temp_stall_secs:    ds 1
 error_flag:         ds 1
 reflow_done_flag:   ds 1
 reflow_beeped:      ds 1
-
+lcd_div: ds 1 
 ; keypad one-shot
 key_lock:           ds 1
 last_key:           ds 1
@@ -216,6 +219,9 @@ T_7seg:
 ;=========================================================
 ; UART (Timer2 baud) - FIXED + CLEAN
 ;=========================================================
+;=========================================================
+; UART (Timer2 baud) - FIXED + CLEAN
+;=========================================================
 InitSerialPort:
     clr TR2
     mov T2CON,#30h
@@ -245,8 +251,8 @@ UART_SendDigit:
     ret
 
 UART_Print_OvenTemp:
-    ; print at ms_count == 0 or 500 (2 Hz)
-
+    ; print at ms_count == 0 OR 500 (2 Hz)
+    
     ; ---- check ms_count == 0 ----
     mov a, ms_count+0
     orl a, ms_count+1
@@ -259,24 +265,52 @@ UART_Print_OvenTemp:
     cjne a, #HIGH(500), UPO_done
 
 UPO_DO_PRINT:
-    lcall Bin16_To_3Digits   ; oven_temp -> R0,R1,R2
+    ; -------- print temperature without leading zeros --------
+    lcall Bin16_To_3Digits   ; oven_temp -> R0 R1 R2 (hundreds, tens, units)
 
-    mov a, #'T'
-    lcall UART_SendByte
-    mov a, #'='
-    lcall UART_SendByte
-
+    ; Check hundreds digit
     mov a, R0
+    jz  UPO_check_tens       ; Skip hundreds if zero
+    
+    ; Print all 3 digits (e.g., "123")
     lcall UART_SendDigit
     mov a, R1
     lcall UART_SendDigit
     mov a, R2
     lcall UART_SendDigit
+    sjmp UPO_print_comma
 
+UPO_check_tens:
+    ; Hundreds is zero, check tens
+    mov a, R1
+    jz  UPO_units_only       ; Skip tens if zero
+    
+    ; Print tens and units (e.g., "25")
+    lcall UART_SendDigit
+    mov a, R2
+    lcall UART_SendDigit
+    sjmp UPO_print_comma
+
+UPO_units_only:
+    ; Print only units (e.g., "5")
+    mov a, R2
+    lcall UART_SendDigit
+
+UPO_print_comma:
+    mov a, #','
+    lcall UART_SendByte
+
+    ; -------- print state (single digit) --------
+    mov a, state
+    add a, #'0'
+    lcall UART_SendByte
+
+    ; newline
     lcall UART_SendCRLF
 
 UPO_done:
     ret
+
 ;=========================================================
 ; TIMER0 (AUDIO TONE)
 ;=========================================================
@@ -423,6 +457,7 @@ Loud_Beep_Once:
     clr  TR0
     clr  SPEAKER
     lcall Wait50ms
+    lcall Wait50ms
     ret
 
 Beep_Once:
@@ -477,29 +512,41 @@ Init_VoltRef:
 ;   volt_ref (2), rm_temp (4), ov_temp (4), oven_temp (2)
 ;   x (4), y (4)
 ;=========================================================
+;=========================================================
+; OvenTemp_Update (2 Hz: ms_count == 0 or 500)
+; - skips when paused or in error screen
+; - runs your full calibrated pipeline
+;=========================================================
 OvenTemp_Update:
-    ; only run once/sec
+    ; ---------- Check if it's time to update (ms_count == 0 OR 500) ----------
     mov a, ms_count+0
     orl a, ms_count+1
-   	jz  OT_continue       ; short jump (near)
-	ljmp OT_abort         ; long jump (anywhere)
-OT_abort:
-    ljmp OT_done
-
-OT_done:
-    ret
+    jz  OT_time_ok          ; ms_count == 0, proceed
+    
+    ; Check if ms_count == 500
+    mov a, ms_count+0
+    cjne a, #LOW(500), OT_donelabel
+    mov a, ms_count+1
+    cjne a, #HIGH(500), OT_donelabel
+    ; Fall through if ms_count == 500
+OT_donelabel:
+ljmp OT_done
+OT_time_ok:
+    ; Check if we should skip (paused or error)
+    ; INVERTED: if NOT paused, jump over the long jump
+    jnb paused_flag, OT_check_error
+    ljmp OT_done               ; Long jump if paused
+    
+OT_check_error:
+    jnb error_demo_flag, OT_continue
+    ljmp OT_done               ; Long jump if error
+    
 OT_continue:
-    jb  paused_flag, OT_abort
-    jb  error_demo_flag, OT_abort
-
-    ; ----------------------------
-    ; ROOM: ADC ch0 -> x
-    ; Apply your scaling: x*4806/volt_ref
-    ; ----------------------------
+    ; ---- Now proceed with temperature reading ----
     mov ADC_C, #0x00
     Wait_Milli_Seconds(#2)
+   
     lcall Get_ADC12_to_x
-
     Load_y(4806)
     lcall mul32
     mov y+0, volt_ref+0
@@ -507,19 +554,17 @@ OT_continue:
     mov y+2, #0
     mov y+3, #0
     lcall div32
-
     mov rm_temp+0, x+0
     mov rm_temp+1, x+1
     mov rm_temp+2, x+2
     mov rm_temp+3, x+3
-
+    
     ; ----------------------------
     ; OVEN: ADC ch1 -> x (scaled)
     ; ----------------------------
     mov ADC_C, #0x01
     Wait_Milli_Seconds(#2)
     lcall Get_ADC12_to_x
-
     Load_y(4806)
     lcall mul32
     mov y+0, volt_ref+0
@@ -527,7 +572,7 @@ OT_continue:
     mov y+2, #0
     mov y+3, #0
     lcall div32
-
+    
     ; ---- BEGIN your calibrated oven math block ----
     Load_y(1000000)
     lcall mul32
@@ -535,62 +580,52 @@ OT_continue:
     lcall div32
     Load_y(302781)
     lcall div32
-
     Load_y(12143)
     lcall mul32
     Load_y(8225)
     lcall add32
     Load_y(10000)
     lcall div32
-
     Load_y(3)
     lcall sub32
-
-    ; Add (room_temp / 100) to oven result (same logic you posted)
+    
+    ; Add (room_temp / 100) to oven result
     mov y+0, rm_temp+0
     mov y+1, rm_temp+1
     mov y+2, rm_temp+2
     mov y+3, rm_temp+3
-
     push x+0
     push x+1
     push x+2
     push x+3
-
     mov x+0, y+0
     mov x+1, y+1
     mov x+2, y+2
     mov x+3, y+3
-
     Load_y(100)
     lcall div32
-
     mov y+0, x+0
     mov y+1, x+1
     mov y+2, x+2
     mov y+3, x+3
-
     pop x+3
     pop x+2
     pop x+1
     pop x+0
-
     lcall add32
     ; ---- END your calibrated oven math block ----
-
+    
     mov ov_temp+0, x+0
     mov ov_temp+1, x+1
     mov ov_temp+2, x+2
     mov ov_temp+3, x+3
-
-    ; CRITICAL: store the exact value used everywhere
+    
+    ; store final integer Celsius used everywhere
     mov oven_temp+0, x+0
     mov oven_temp+1, x+1
 
-    ljmp OT_done        ; if OT_done ends up far, change this to LJMP too
-
-
-
+OT_done:
+    ret
 
 ;=========================================================
 ; INPUT HELPERS
@@ -1189,11 +1224,63 @@ FSM_s1:
     mov seconds+1, a
 FSM_ret_s1:
     ret
-
 FSM_s2:
     cjne a, #2, FSM_s3
-    lcall Set_PWM_Low
 
+    ; target = soak_temp (convert BCD -> target16)
+    mov R0, #soak_temp
+    lcall PackedBCD3_to_Bin16_DATA
+    mov target16+0, tmp16+0
+    mov target16+1, tmp16+1
+
+    ; ---- if T < (target - band) => PWM = 10%
+    mov a, target16+0
+    clr c
+    subb a, #LOW(SOAK_BAND)
+    mov tmp16+0, a
+    mov a, target16+1
+    subb a, #HIGH(SOAK_BAND)
+    mov tmp16+1, a
+
+    mov target16+0, tmp16+0
+    mov target16+1, tmp16+1
+
+    mov tmp16+0, oven_temp+0
+    mov tmp16+1, oven_temp+1
+    lcall GE16
+    jc  S2_not_below      ; if T >= (target-band), skip heating
+
+    mov PWM_duty, #SOAK_PULSE_DUTY
+    sjmp S2_time_check
+
+S2_not_below:
+    ; ---- if T > (target + band) => PWM = 0%
+    mov R0, #soak_temp
+    lcall PackedBCD3_to_Bin16_DATA
+    mov target16+0, tmp16+0
+    mov target16+1, tmp16+1
+
+    mov a, target16+0
+    add a, #LOW(SOAK_BAND)
+    mov target16+0, a
+    mov a, target16+1
+    addc a, #HIGH(SOAK_BAND)
+    mov target16+1, a
+
+    mov tmp16+0, oven_temp+0
+    mov tmp16+1, oven_temp+1
+    lcall GE16
+    jc  S2_too_hot         ; if T >= (target+band) then too hot
+
+    ; inside band => gentle maintenance
+    mov PWM_duty, #SOAK_PULSE_DUTY
+    sjmp S2_time_check
+
+S2_too_hot:
+    mov PWM_duty, #0
+
+S2_time_check:
+    ; ---- original soak time check continues below ----
     mov R0, #soak_time
     lcall PackedBCD3_to_Bin16_DATA
     mov target16+0, tmp16+0
@@ -1210,6 +1297,7 @@ FSM_s2:
     mov seconds+1, a
 FSM_ret_s2:
     ret
+
 
 FSM_s3:
     cjne a, #3, FSM_s4
@@ -1779,7 +1867,7 @@ main:
     mov P1MOD,#10100010b
     mov P2MOD,#10000010b
     setb P1.5
-    
+    mov lcd_div, #0
     mov a, LEDRA
     clr a
     mov LEDRA, a
@@ -1915,7 +2003,17 @@ RUN_NORMAL:
     ; UART prints SAME oven_temp that HEX shows
     lcall UART_Print_OvenTemp
 
-    lcall Display_Status_All
+    ; update LCD/HEX less often to avoid LCD lag
+inc lcd_div
+mov a, lcd_div
+cjne a, #50, loop_skip_display   ; 50 loops ~ adjust as needed
+mov lcd_div, #0
+lcall Display_Status_All
+loop_skip_display:
+sjmp loop
+    
+    
+    
     sjmp loop
 
 END
