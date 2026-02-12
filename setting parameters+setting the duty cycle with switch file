@@ -1,0 +1,599 @@
+$NOLIST
+$MODMAX10
+$LIST
+
+;=========================================================
+; CLOCK + TIMERS
+;=========================================================
+CLK           EQU 33333333
+
+TIMER0_RATE   EQU 4096
+TIMER0_RELOAD EQU ((65536-(CLK/(12*TIMER0_RATE))))
+
+TIMER2_RATE   EQU 1000
+TIMER2_RELOAD EQU ((65536-(CLK/(12*TIMER2_RATE))))
+
+SOUND_OUT     EQU P2.1
+PWM           EQU P2.7
+
+KEY_STAR      EQU 0x0E      ; *
+KEY_POUND     EQU 0x0F      ; #
+
+; LCD value field start column (after "SOAK Tmp: ")
+VALUE_COL     EQU 11        ; value occupies col 11..13
+
+;=========================================================
+; DUTY-CYCLE EDIT MODE SWITCH
+; NOTE: If your switch symbol isn't SWA, change this line
+;=========================================================
+SW5           EQU SWA.5     ; SW[5] on DE10-Lite (adjust if your SFR name differs)
+
+;=========================================================
+; VECTORS
+;=========================================================
+org 0x0000
+    ljmp main
+org 0x000B
+    ljmp Timer0_ISR
+org 0x002B
+    ljmp Timer2_ISR
+
+;=========================================================
+; DATA
+;=========================================================
+dseg at 0x30
+PWM_counter:  ds 1
+PWM_duty:     ds 1
+
+bcd:          ds 5          ; packed BCD digit buffer (typed digits go here)
+param_index:  ds 1          ; 0..4
+
+soak_temp:    ds 2
+soak_time:    ds 2
+reflow_temp:  ds 2
+reflow_time:  ds 2
+
+bseg
+blank_flag:   dbit 1         ; 1 = nothing typed yet
+duty_mode:    dbit 1         ; 1 = SW5 duty edit page active
+
+cseg
+
+;=========================================================
+; LCD WIRING
+;=========================================================
+ELCD_RS equ P0.0
+ELCD_E  equ P0.2
+ELCD_D4 equ P0.7
+ELCD_D5 equ P0.5
+ELCD_D6 equ P0.3
+ELCD_D7 equ P0.1
+
+$NOLIST
+$include(LCD_4bit_DE10Lite_no_RW.inc)
+$include(Read_keypad.inc)
+$LIST
+
+;=========================================================
+; STRINGS
+;=========================================================
+soaktemp_str:    db 'SOAK Tmp: ',0
+soaktime_str:    db 'SOAK time:',0
+reflowtemp_str:  db 'REFL Tmp: ',0
+reflowtime_str:  db 'REFL time:',0
+profile_ready:   db 'PROFILE READY',0
+pwm_str:         db 'PWM Duty: ',0
+
+help_str:        db '0-999*=ENT#=CLR',0
+
+;=========================================================
+; 7SEG TABLE
+;=========================================================
+T_7seg:
+    DB 0xC0,0xF9,0xA4,0xB0,0x99
+    DB 0x92,0x82,0xF8,0x80,0x90
+
+;=========================================================
+; TIMER0 (SQUARE WAVE AUDIO)
+;=========================================================
+Timer0_Init:
+    mov TMOD,#01h
+    mov TH0,#high(TIMER0_RELOAD)
+    mov TL0,#low(TIMER0_RELOAD)
+    setb ET0
+    setb TR0
+    ret
+
+Timer0_ISR:
+    mov TH0,#high(TIMER0_RELOAD)
+    mov TL0,#low(TIMER0_RELOAD)
+    cpl SOUND_OUT
+    reti
+
+;=========================================================
+; TIMER2 (1kHz ISR) + PWM (0..100%)
+; PWM_duty = 0..100
+;=========================================================
+Timer2_Init:
+    mov T2CON,#0
+    mov TH2,#high(TIMER2_RELOAD)
+    mov TL2,#low(TIMER2_RELOAD)
+    mov RCAP2H,#high(TIMER2_RELOAD)
+    mov RCAP2L,#low(TIMER2_RELOAD)
+
+    mov PWM_counter,#0
+    mov PWM_duty,#0
+
+    setb ET2
+    setb TR2
+    ret
+
+Timer2_ISR:
+    clr TF2
+    push acc
+    push psw
+
+    ; If duty == 100 => always ON
+    mov a, PWM_duty
+    cjne a, #100, pwm_normal
+    setb PWM
+    sjmp pwm_update_counter
+
+pwm_normal:
+    ; PWM_counter 0..99
+    mov a, PWM_counter
+    jnz p1x
+    setb PWM
+p1x:
+    cjne a, PWM_duty, p2x
+    clr PWM
+p2x:
+
+pwm_update_counter:
+    mov a, PWM_counter
+    inc a
+    cjne a, #100, p3x
+    mov a, #0
+p3x:
+    mov PWM_counter, a
+
+    pop psw
+    pop acc
+    reti
+
+;=========================================================
+; INPUT HELPERS
+;=========================================================
+Clear_Input:
+    clr a
+    mov bcd+0,a
+    mov bcd+1,a
+    mov bcd+2,a
+    mov bcd+3,a
+    mov bcd+4,a
+    setb blank_flag
+    ret
+
+;=========================================================
+; LCD HELPERS
+;=========================================================
+LCD_Clear:
+    WriteCommand(#01h)
+    Wait_Milli_Seconds(#2)
+    ret
+
+; Clear the 3-digit value field on line 1 (VALUE_COL..VALUE_COL+2)
+LCD_ClearValueArea:
+    Set_Cursor(1,VALUE_COL)
+    WriteData(#' ')
+    WriteData(#' ')
+    WriteData(#' ')
+    ret
+
+; Clear line 2 (16 chars)
+LCD_ClearLine2:
+    Set_Cursor(2,1)
+    mov R0,#16
+L2C1:
+    WriteData(#' ')
+    djnz R0,L2C1
+    ret
+
+;=========================================================
+; GET LSD 3 DIGITS FROM BCD INTO R0/R1/R2
+; R0=hundreds, R1=tens, R2=units
+;=========================================================
+Get_LSD3:
+    mov a,bcd+0
+    anl a,#0Fh
+    mov R2,a
+
+    mov a,bcd+0
+    swap a
+    anl a,#0Fh
+    mov R1,a
+
+    mov a,bcd+1
+    anl a,#0Fh
+    mov R0,a
+    ret
+
+; WriteDigitA: prints A (0..9) as ASCII on LCD
+WriteDigitA:
+    cjne a,#0,WD1
+    WriteData(#'0')  ;0
+    ret
+WD1: cjne a,#1,WD2
+    WriteData(#'1')
+    ret
+WD2: cjne a,#2,WD3
+    WriteData(#'2')
+    ret
+WD3: cjne a,#3,WD4
+    WriteData(#'3')
+    ret
+WD4: cjne a,#4,WD5
+    WriteData(#'4')
+    ret
+WD5: cjne a,#5,WD6
+    WriteData(#'5')
+    ret
+WD6: cjne a,#6,WD7
+    WriteData(#'6')
+    ret
+WD7: cjne a,#7,WD8
+    WriteData(#'7')
+    ret
+WD8: cjne a,#8,WD9
+    WriteData(#'8')
+    ret
+WD9:
+    WriteData(#'9')
+    ret
+
+; LCD_ShowInput: right-aligned 3-char field
+; 5 -> "  5", 90 -> " 90", 150 -> "150"
+LCD_ShowInput:
+    lcall LCD_ClearValueArea
+    jb blank_flag, LSI_done
+
+    lcall Get_LSD3
+
+    mov a,R0
+    jnz LSI_3
+
+    mov a,R1
+    jnz LSI_2
+
+; 1 digit
+LSI_1:
+    Set_Cursor(1,VALUE_COL+2)
+    mov a,R2
+    lcall WriteDigitA
+    sjmp LSI_done
+
+; 2 digits
+LSI_2:
+    Set_Cursor(1,VALUE_COL+1)
+    mov a,R1
+    lcall WriteDigitA
+    mov a,R2
+    lcall WriteDigitA
+    sjmp LSI_done
+
+; 3 digits
+LSI_3:
+    Set_Cursor(1,VALUE_COL)
+    mov a,R0
+    lcall WriteDigitA
+    mov a,R1
+    lcall WriteDigitA
+    mov a,R2
+    lcall WriteDigitA
+
+LSI_done:
+    ret
+
+; HEX_ShowInput (HEX2 HEX1 HEX0) no leading zeros
+HEX_ShowInput:
+    mov dptr,#T_7seg
+    jb blank_flag, HX_blank
+
+    lcall Get_LSD3
+
+    mov a,R0
+    jz HX_h_blank
+    movc a,@a+dptr
+    mov HEX2,a
+    sjmp HX_tens
+HX_h_blank:
+    mov HEX2,#0FFh
+
+HX_tens:
+    mov a,R1
+    jnz HX_t_show
+    mov a,R0
+    jz  HX_t_blank
+HX_t_show:
+    mov a,R1
+    movc a,@a+dptr
+    mov HEX1,a
+    sjmp HX_units
+HX_t_blank:
+    mov HEX1,#0FFh
+
+HX_units:
+    mov a,R2
+    movc a,@a+dptr
+    mov HEX0,a
+    mov HEX3,#0FFh
+    mov HEX4,#0FFh
+    mov HEX5,#0FFh
+    ret
+
+HX_blank:
+    mov HEX0,#0FFh
+    mov HEX1,#0FFh
+    mov HEX2,#0FFh
+    mov HEX3,#0FFh
+    mov HEX4,#0FFh
+    mov HEX5,#0FFh
+    ret
+
+;=========================================================
+; LCD_Update screens for each parameter
+; If duty_mode=1, show PWM Duty page instead
+;=========================================================
+LCD_Update:
+    lcall LCD_Clear
+    lcall LCD_ClearLine2
+
+    jnb duty_mode, LCD_param_pages   ; if NOT duty_mode, go do normal pages
+    ljmp LCD_DUTY_PAGE               ; long jump (no distance limit)
+
+LCD_param_pages:
+    mov a,param_index
+    cjne a,#0,L1y
+    Set_Cursor(1,1)
+    Send_Constant_String(#soaktemp_str)
+    Set_Cursor(2,1)
+    Send_Constant_String(#help_str)
+    lcall LCD_ShowInput
+    ret
+    
+LCD_DUTY_PAGE:
+    Set_Cursor(1,1)
+    Send_Constant_String(#pwm_str)
+    Set_Cursor(2,1)
+    Send_Constant_String(#help_str)
+    lcall LCD_ShowInput
+    ret
+    
+L1y:
+    cjne a,#1,L2y
+    Set_Cursor(1,1)
+    Send_Constant_String(#soaktime_str)
+    Set_Cursor(2,1)
+    Send_Constant_String(#help_str)
+    lcall LCD_ShowInput
+    ret
+L2y:
+    cjne a,#2,L3y
+    Set_Cursor(1,1)
+    Send_Constant_String(#reflowtemp_str)
+    Set_Cursor(2,1)
+    Send_Constant_String(#help_str)
+    lcall LCD_ShowInput
+    ret
+L3y:
+    cjne a,#3,L4y
+    Set_Cursor(1,1)
+    Send_Constant_String(#reflowtime_str)
+    Set_Cursor(2,1)
+    Send_Constant_String(#help_str)
+    lcall LCD_ShowInput
+    ret
+L4y:
+    Set_Cursor(1,1)
+    Send_Constant_String(#profile_ready)
+    ret
+
+
+;=========================================================
+; SAVE PARAMS (from typed bcd) - original behavior
+;=========================================================
+Save_Param:
+    mov a,param_index
+    cjne a,#0,s1
+    mov soak_temp+0,bcd+0
+    mov soak_temp+1,bcd+1
+    ret
+s1:
+    cjne a,#1,s2
+    mov soak_time+0,bcd+0
+    mov soak_time+1,bcd+1
+    ret
+s2:
+    cjne a,#2,s3
+    mov reflow_temp+0,bcd+0
+    mov reflow_temp+1,bcd+1
+    ret
+s3:
+    mov reflow_time+0,bcd+0
+    mov reflow_time+1,bcd+1
+    ret
+
+;=========================================================
+; SAVE DUTY (0..100) from typed digits
+; - uses Get_LSD3 -> R0,R1,R2
+; - clamps anything >100 to 100
+;=========================================================
+Save_Duty:
+    ; blank => 0
+    jb blank_flag, SD_zero
+
+    lcall Get_LSD3
+
+    ; if hundreds >= 2 => clamp 100
+    mov a, R0
+    cjne a, #0, SD_h_nonzero
+    ; hundreds = 0 => A = 10*R1 + R2 (0..99)
+    mov a, R1
+    mov b, #10
+    mul ab              ; A = 10*R1
+    add a, R2           ; A = 10*R1 + R2
+    mov PWM_duty, a
+    ret
+
+SD_h_nonzero:
+    cjne a, #1, SD_clamp100
+    ; hundreds = 1 => value is 100..199
+    ; allow only exactly 100, else clamp
+    mov a, R1
+    orl a, R2
+    jz SD_exact100
+SD_clamp100:
+    mov PWM_duty, #100
+    ret
+
+SD_exact100:
+    mov PWM_duty, #100
+    ret
+
+SD_zero:
+    mov PWM_duty, #0
+    ret
+
+;=========================================================
+; HANDLE KEYPAD INPUT (R7 keycode)
+; - If duty_mode=1, ENTER(*) saves PWM duty instead of params
+;=========================================================
+Handle_Key:
+    mov a,R7
+
+    ; ENTER (*)
+    cjne a,#KEY_STAR,HK_clear
+    jb duty_mode, HK_save_duty
+
+    ; normal parameter save
+    lcall Save_Param
+    mov a,param_index
+    cjne a,#4,HK_inc
+    lcall Clear_Input
+    lcall LCD_Update
+    lcall HEX_ShowInput
+    ret
+
+HK_inc:
+    inc param_index
+    lcall Clear_Input
+    lcall LCD_Update
+    lcall HEX_ShowInput
+    ret
+
+HK_save_duty:
+    lcall Save_Duty
+    lcall Clear_Input
+    lcall LCD_Update
+    lcall HEX_ShowInput
+    ret
+
+HK_clear:
+    ; CLEAR (#) -> CLEAR LCD VALUE FIELD TOO
+    cjne a,#KEY_POUND,HK_digit
+    lcall Clear_Input
+    lcall LCD_ShowInput
+    lcall HEX_ShowInput
+    ret
+
+HK_digit:
+    ; accept only 0..9
+    mov a,R7
+    cjne a,#0Ah,HK_maybe
+    ret
+HK_maybe:
+    jc HK_ok
+    ret
+HK_ok:
+    clr blank_flag
+    lcall Shift_Digits_Left
+    lcall LCD_ShowInput
+    lcall HEX_ShowInput
+    ret
+
+;=========================================================
+; MAIN
+;=========================================================
+main:
+    mov SP,#7Fh
+
+    ; set the pins to output (your original)
+    mov P0MOD,#10101111b
+    mov P1MOD,#10000010b
+    mov P2MOD,#10000010b
+
+    ; set the parameters to 0
+    clr a
+    mov param_index,a
+
+    ; start in param mode
+    clr duty_mode
+
+    ; clear all inputs
+    lcall Clear_Input
+
+    ; initialize keypad pins
+    lcall Configure_Keypad_Pins
+
+    ; init timers
+    lcall Timer0_Init
+    lcall Timer2_Init
+
+    ; PWM pin default (will be driven in ISR anyway)
+    setb PWM
+
+    ; global interrupts
+    setb EA
+
+    ; init LCD
+    lcall ELCD_4BIT
+    lcall LCD_Update
+    lcall HEX_ShowInput
+
+loop:
+    ;=====================================================
+    ; SW5 selects DUTY MODE (1) vs PARAM MODE (0)
+    ; If mode changes, clear input + refresh LCD/HEX
+    ;=====================================================
+    jb SW5, SW5_ON
+
+SW5_OFF:
+    jb duty_mode, MODE_TO_PARAM
+    sjmp SW5_DONE
+MODE_TO_PARAM:
+    clr duty_mode
+    lcall Clear_Input
+    lcall LCD_Update
+    lcall HEX_ShowInput
+    sjmp SW5_DONE
+
+SW5_ON:
+    jnb duty_mode, MODE_TO_DUTY
+    sjmp SW5_DONE
+MODE_TO_DUTY:
+    setb duty_mode
+    lcall Clear_Input
+    lcall LCD_Update
+    lcall HEX_ShowInput
+
+SW5_DONE:
+
+    ;=====================================================
+    ; Keypad loop (original)
+    ;=====================================================
+    lcall Keypad
+    jnc loop
+    lcall Handle_Key
+    sjmp loop
+
+END

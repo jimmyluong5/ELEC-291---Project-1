@@ -4,7 +4,7 @@ $NOLIST
 ; and division of 32-bit integers. Also included are
 ; binary to bcd and bcd to binary conversion subroutines.
 ;
-; 2011-2013 by Jesus Calvino-Fraga
+; 2011-2025 by Jesus Calvino-Fraga
 ;
 ;----------------------------------------------------
 
@@ -21,6 +21,10 @@ hex2bcd:
 	push AR0
 	push AR1
 	push AR2
+	push x+3
+	push x+2
+	push x+1
+	push x+0
 	
 	clr a
 	mov bcd+0, a ; Initialize BCD to 00-00-00-00-00 
@@ -55,81 +59,16 @@ hex2bcd_L2:
 	djnz r1, hex2bcd_L2
 
 	djnz r2, hex2bcd_L0
-
-	pop AR2
-	pop AR1
-	pop AR0
-	pop psw
-	pop acc
-	ret
-
-
-;----------------------------------------------------
-; hex2bcd2:
-; Converts the 32-bit hex number in 'x' to a 
-; 10-digit packed BCD in 'bcd' using the
-; double-dabble algorithm.  This is what you would
-; have to do in a proccessor without a bcd addition
-; instruction.  The 8051 can add bcd number, so
-; this function is here for your reference only.  Compare
-; to the function above which uses the DA A instruction
-; resulting in faster and smaller code. 
-;---------------------------------------------------
-hex2bcd2:
-	push acc
-	push psw
-	push AR0
-	push AR1
-	push AR2
-
-	clr a
-	mov bcd+0, a ; Initialize BCD to 00-00-00-00-00 
-	mov bcd+1, a
-	mov bcd+2, a
-	mov bcd+3, a
-	mov bcd+4, a
-	mov r2, #32  ; We need process 32 bits
-
-hex2bcd2_L0:
-	; Shift binary left	
-	mov a, x+3
-	mov c, acc.7 ; This way x remains unchanged!
-	mov r1, #4
-	mov r0, #(x+0)
-hex2bcd2_L1:
-	mov a, @r0
-	rlc a
-	mov @r0, a
-	inc r0
-	djnz r1, hex2bcd2_L1
-
-	; Shif bcd left	
-	mov r1, #5	          ; BCD byte count = 5
-	mov r0, #(bcd+0)      ; r0 points to least significant bcd digits
-hex2bcd2_L2:
-	push psw              ; Save carry
-	mov a, @r0
-	add a, #33h           ; Pre-correction before shifting left
-	jb acc.7, hex2bcd2_L3 ; If the bcd digit was > 4 keep the correction
-	add a, #(100h-30h)    ; Remove the correction to the MSD by subtracting 30h
-hex2bcd2_L3:
-	jb acc.3, hex2bcd2_L4 ; If the bcd digit was > 4 keep the correction
-	add a, #(100h-03h)    ; Remove the correction to the LSD by subtracting 03h
-hex2bcd2_L4:
-	pop psw               ; Restore carry
-	rlc a
-	mov @r0, a
-	inc r0
-	djnz r1, hex2bcd2_L2
 	
-	djnz r2, hex2bcd2_L0
-
+	pop x+0
+	pop x+1
+	pop x+2
+	pop x+3
 	pop AR2
 	pop AR1
 	pop AR0
 	pop psw
 	pop acc
-
 	ret
 
 ;------------------------------------------------
@@ -143,6 +82,11 @@ bcd2hex:
 	push AR0
 	push AR1
 	push AR2
+	push bcd+4
+	push bcd+3
+	push bcd+2
+	push bcd+1
+	push bcd+0
 
 	mov r2, #32  ; We need 32 bits
 
@@ -178,6 +122,18 @@ bcd2hex_L4:
 	
 	djnz r2, bcd2hex_L0
 
+	; If the bcd number is larger than 4294967295 make mf=1 to indicate an input error
+	setb mf
+	mov a, bcd+0
+	jnz bcd2hex_L5
+	clr mf
+	
+bcd2hex_L5:
+	pop bcd+0
+	pop bcd+1
+	pop bcd+2
+	pop bcd+3
+	pop bcd+4
 	pop AR2
 	pop AR1
 	pop AR0
@@ -204,6 +160,7 @@ add32:
 	mov a, x+3
 	addc a, y+3
 	mov x+3, a
+	mov mf, c
 	pop psw
 	pop acc
 	ret
@@ -227,6 +184,7 @@ sub32:
 	mov a, x+3
 	subb a, y+3
 	mov x+3, a
+	mov mf, c
 	pop psw
 	pop acc
 	ret
@@ -329,6 +287,8 @@ mul32:
 	push AR1
 	push AR2
 	push AR3
+	push AR4
+	push AR5
 		
 	; R0 = x+0 * y+0
 	; R1 = x+1 * y+0 + x+0 * y+1
@@ -398,30 +358,104 @@ mul32:
 	mul	ab		; x+3 * y+0
 	add	a,R3
 	mov	R3,a
+	mov R4,b
+	mov R5,#0
 	
 	mov	a,x+2
 	mov	b,y+1
 	mul	ab		; x+2 * y+1
 	add	a,R3
 	mov	R3,a
+	mov a,b
+	addc a,R4
+	mov R4,a
+	clr a
+	addc a,R5
+	mov R5,a
 	
 	mov	a,x+1
 	mov	b,y+2
 	mul	ab		; x+1 * y+2
 	add	a,R3
 	mov	R3,a
+	mov a,b
+	addc a,R4
+	mov R4,a
+	clr a
+	addc a,R5
+	mov R5,a
 	
 	mov	a,x+0
 	mov	b,y+3
 	mul	ab		; x+0 * y+3
 	add	a,R3
 	mov	R3,a
+	mov a,b
+	addc a,R4
+	mov R4,a
+	clr a
+	addc a,R5
+	mov R5,a
 	
+	; See if there is overflow
+	mov a, R4
+	orl a, R5
+	mov R4, a
+	
+	mov a, x+3
+	mov b, y+1
+	mul ab
+	orl a, b
+	orl a, R4
+	mov R4, a
+
+	mov a, x+2
+	mov b, y+2
+	mul ab
+	orl a, b
+	orl a, R4
+	mov R4, a
+	
+	mov a, x+1
+	mov b, y+3
+	mul ab
+	orl a, b
+	orl a, R4
+	mov R4, a
+
+	mov a, x+3
+	mov b, y+2
+	mul ab
+	orl a, b
+	orl a, R4
+	mov R4, a
+	
+	mov a, x+2
+	mov b, y+3
+	mul ab
+	orl a, b
+	orl a, R4
+	mov R4, a
+
+	mov a, x+3
+	mov b, y+3
+	mul ab
+	orl a, b
+	orl a, R4
+	mov R4, a
+
 	mov	x+3,R3
 	mov	x+2,R2
 	mov	x+1,R1
 	mov	x+0,R0
-
+	
+	setb mf
+	cjne R4, #0, mul32_done
+	clr mf
+	
+mul32_done:
+	pop AR5
+	pop AR4
 	pop AR3
 	pop AR2
 	pop AR1
@@ -447,6 +481,16 @@ div32:
 	push AR3
 	push AR4
 	
+	mov a, y+0
+	orl a, y+1
+	orl a, y+2
+	orl a, y+3
+	jnz div32_L0
+	setb mf
+	ljmp div32_exit	
+	
+div32_L0:
+	clr mf
 	mov	R4,#32
 	clr	a
 	mov	R0,a

@@ -16,6 +16,8 @@ x:		ds	4
 y:		ds	4
 bcd:	ds	5
 rm_temp: ds 4
+ov_temp: ds 4
+volt_ref: ds 2
 
 bseg
 
@@ -26,7 +28,7 @@ BAUD   EQU 115200
 T2LOAD EQU 65536-(FREQ/(32*BAUD))
 
 CSEG
-      
+
 InitSerialPort:
 	; Configure serial port and baud rate
 	clr TR2 ; Disable timer 2
@@ -59,13 +61,13 @@ cseg
 ; These 'equ' must match the wiring between the DE10Lite board and the LCD!
 ; P0 is in connector JPIO.  Check "CV-8052 Soft Processor in the DE10Lite Board: Getting
 ; Started Guide" for the details.
-ELCD_RS equ P0.0   ; instead of 1.7
+LCD_RS equ P0.0   ; instead of 1.7
 ; ELCD_RW equ Px.x ; Not used.  Connected to ground 
-ELCD_E  equ P0.2 ; instead of 1.1
-ELCD_D4 equ P0.7
-ELCD_D5 equ P0.5
-ELCD_D6 equ P0.3
-ELCD_D7 equ P0.1
+LCD_E  equ P0.2 ; instead of 1.1
+LCD_D4 equ P0.7
+LCD_D5 equ P0.5
+LCD_D6 equ P0.3
+LCD_D7 equ P0.1
 
 
 
@@ -81,9 +83,9 @@ myLUT:
 
 Wait50ms:
 ;33.33MHz, 1 clk per cycle: 0.03us
-	mov R0, #30
+	mov R0, #150
 Wait50ms_L3:
-	mov R1, #74
+	mov R1, #148
 Wait50ms_L2:
 	mov R2, #250
 Wait50ms_L1:
@@ -122,37 +124,42 @@ Display_Voltage_7seg:
 	ret
 
 Display_Voltage_LCD:
-	Set_Cursor(1,12)
+Set_Cursor(1,12)
+Display_BCD(bcd+1)
+Display_char(#'.')
+Display_BCD(bcd+0)
+ret
 
 
-
+Display_Oven_Serial:
 	mov a, bcd+1
 	swap a
 	anl a, #0FH
-	orl a, #'0'
-	lcall ?WriteData
+	add a, #30h
+	lcall putchar
 	
 	mov a, bcd+1
 	anl a, #0FH
-	orl a, #'0'
-	lcall ?WriteData
+	add a, #30h
+	lcall putchar
 	
-	mov a, #'.'
-	lcall ?WriteData
-
 	mov a, bcd+0
 	swap a
 	anl a, #0FH
-	orl a, #'0'
-	lcall ?WriteData
+	add a, #30h
+	lcall putchar
 	
 	mov a, bcd+0
 	anl a, #0FH
-	orl a, #'0'
-	lcall ?WriteData
-	
+	add a, #30h
+	lcall putchar
+
+	mov a, #'\r'
+	lcall putchar
+	mov a, #'\n'
+	lcall putchar
 	ret
-	
+
 Display_Voltage_Serial:
 	mov a, bcd+1
 	swap a
@@ -185,44 +192,6 @@ Display_Voltage_Serial:
 	lcall putchar
 	ret
 	
-Display_Oven_Serial:
-	mov a, bcd+1
-	swap a
-	anl a, #0FH
-	orl a, #'0'
-	lcall putchar
-	
-	mov a, bcd+1
-	anl a, #0FH
-	orl a, #'0'
-	lcall putchar
-	
-	mov a, #'.'
-	lcall putchar
-
-	mov a, bcd+0
-	swap a
-	anl a, #0FH
-	orl a, #'0'
-	lcall putchar
-	
-	mov a, bcd+0
-	anl a, #0FH
-	orl a, #'0'
-	lcall putchar
-	
-	mov a, #','
-	lcall putchar
-	
-	mov a, #'1'
-	lcall putchar
-
-	mov a, #'\r'
-	lcall putchar
-	mov a, #'\n'
-	lcall putchar
-	ret
-	
 	
 	
 Display_Room_Temp:
@@ -240,24 +209,22 @@ Display_BCD(bcd+0)
 ret
 	
 Display_Oven_Temp:
-
-Load_y(41) ;was 41
-lcall div32
 Load_y(1000000)
 lcall mul32
+Load_y(41) ;was 41
+lcall div32
 Load_y(302781)
 lcall div32 ;still need to add rm temp
 ; scaling function
-Load_y(12158) ; 12143 should also work, probably.
+Load_y(12143) ; 12143 should also work, probably.
 lcall mul32
 Load_y(8225)
 lcall add32
 Load_y(10000)
 lcall div32
 
-
-Load_y(10)
-lcall div32
+Load_y(2)
+lcall sub32
 
 ; --- Prepare Room Temp for addition ---
 ; We need to move rm_temp to Y and divide by 10 to strip the decimal
@@ -278,8 +245,8 @@ mov x+2, y+2
 mov x+3, y+3
 
 
-;Load_y(100)       ; Divide by 10 to turn 254 into 25
-;lcall div32
+Load_y(100)       ; Divide by 10 to turn 254 into 25
+lcall div32
 
 ; Move the integer room temp into Y
 mov y+0, x+0
@@ -293,8 +260,17 @@ pop x+1
 pop x+0
 
 lcall add32      ; Now adding Oven(150) + Room(25) = 175
-lcall hex2bcd
 
+;Load_y(12) ;Software correction for oven offset
+;lcall sub32
+
+mov ov_temp+0, x+0
+mov ov_temp+1, x+1
+mov ov_temp+2, x+2
+mov ov_temp+3, x+3
+
+lcall hex2bcd
+lcall Display_Oven_Serial
 ; Display Logic
 Set_Cursor(2, 13)
 Display_BCD(bcd+1)
@@ -323,71 +299,68 @@ mycode:
 	mov LEDRB, a
 	setb LEDRA.0
 	
+	
+	
 	lcall InitSerialPort
 	
 	; COnfigure the pins connected to the LCD as outputs
 	mov P0MOD, #10101111b ; P0.1, P0.3, P0.5, P0.7 are outputs.  ('1' makes the pin output)
     mov P1MOD, #10000010b ; P1.7 and P1.1 are outputs
 
-    lcall ELCD_4BIT ; Configure LCD in four bit mode
+    lcall LCD_4BIT ; Configure LCD in four bit mode
     ; For convenience a few handy macros are included in 'LCD_4bit_DE1Lite.inc':
 	Set_Cursor(1, 1)
     Send_Constant_String(#rm_temp_str)
     Set_Cursor(2,1)
     Send_Constant_String(#ov_temp_str)
-    
-	
-	mov dptr, #rm_temp
-	lcall SendString
-	mov a, #'\r'
-	lcall putchar
-	mov a, #'\n'
-	lcall putchar
 	
 	mov ADC_C, #0x80 ; Reset ADC
 	lcall Wait50ms
+	
+	mov ADC_C, #0x2
+	lcall get_adc
+	mov volt_ref+0, x+0
+	mov volt_ref+1, x+1
+	
+	Load_y(4806)
+	lcall mul32
+	
+	mov y+0, volt_ref+0
+	mov y+1, volt_ref+1
+	mov y+2, #0
+	mov y+3, #0
+	lcall div32
 
 forever:
-	mov a, SWA ; The first three switches select the channel to read
-	anl a, #0x07
-	mov ADC_C, a
+	;mov a,SWA ; The first three switches select the channel to read
+	;anl a, #0x07
 	
+	
+	
+	
+	mov ADC_C, #0x0
 	; Load 32-bit 'x' with 12-bit adc result
-	mov x+3, #0
-	mov x+2, #0
-	mov x+1, ADC_H
-	mov x+0, ADC_L
+	lcall get_adc
 	
-	; Convert to voltage by multiplying by 5.000 and dividing by 4096
-	Load_y(5000)
-	lcall mul32
+	mov rm_temp+0, x+0
+	mov rm_temp+1, x+1
+	mov rm_temp+2, x+2
+	mov rm_temp+3, x+3
 	
-	Load_y(4095)
-	lcall div32
-	
-	Load_y(2713) ;273.15 (2713)
-	lcall sub32
-	
-	Load_y(10)
-	lcall mul32
 	
 	lcall hex2bcd
-	lcall Display_Voltage_7seg
 	lcall Display_Voltage_LCD
-	lcall Display_Oven_Serial
+
+	lcall Wait50ms
+	lcall Wait50ms
+	lcall Wait50ms
+	;lcall bcd2hex
+	mov ADC_C, #0x1
+	lcall get_adc
+	
+	;lcall Display_Voltage_Serial
 	lcall Display_Oven_Temp
-
-
-	lcall Wait50ms
-	lcall Wait50ms
-	lcall Wait50ms
-	lcall Wait50ms
-	lcall Wait50ms
-	lcall Wait50ms
-	lcall Wait50ms
-	lcall Wait50ms
-	lcall Wait50ms
-	lcall Wait50ms
+	;lcall Display_Voltage_7seg
 	ljmp forever
 	
-end   
+end
