@@ -186,16 +186,18 @@ Keypad_Key_Code:
 keypad_default:	
 	; Check row 1	
 	clr ROW1
-	nop ; delay to account for the trace length
-	nop
-	CHECK_COLUMN(COL1, #01H)
-	CHECK_COLUMN(COL2, #02H)
-	CHECK_COLUMN(COL3, #03H)
+	;nop ; delay to account for the trace length
+	;nop
+	lcall Wait20us
+	CHECK_COLUMN(COL1, #07H)
+	CHECK_COLUMN(COL2, #08H)
+	CHECK_COLUMN(COL3, #09H)
 	CHECK_COLUMN(COL4, #0AH)
 	setb ROW1
-	nop
-	nop
-
+	;nop
+	;nop
+	lcall Wait20us
+	
 	; Check row 2	
 	clr ROW2
 	CHECK_COLUMN(COL1, #04H)
@@ -206,9 +208,9 @@ keypad_default:
 
 	; Check row 3	
 	clr ROW3
-	CHECK_COLUMN(COL1, #07H)
-	CHECK_COLUMN(COL2, #08H)
-	CHECK_COLUMN(COL3, #09H)
+	CHECK_COLUMN(COL1, #01H)
+	CHECK_COLUMN(COL2, #02H)
+	CHECK_COLUMN(COL3, #03H)
 	CHECK_COLUMN(COL4, #0CH)
 	setb ROW3
 
@@ -259,6 +261,12 @@ keypad_90deg:
 
 	clr c
 	ret
+	
+Wait20us:
+    mov R0, #220        ; 220 * 3 cycles ˜ 660 cycles
+W20_L1:
+    djnz R0, W20_L1     ; 3 cycles each loop
+    ret
 	
 main_code:
 	mov SP, #7FH
