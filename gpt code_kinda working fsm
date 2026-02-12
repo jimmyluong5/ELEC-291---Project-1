@@ -39,7 +39,7 @@ KEY_POUND       EQU 0x0F      ; #
 KEY_ERR_BTN     EQU 0x0B      ; B (Row2 Col4)
 KEY_STOP_BTN    EQU 0x0C      ; C (Row3 Col4)
 KEY_START_BTN   EQU 0x0D      ; D (Row4 Col4)
-KEY_TIME_RESET  EQU 0x01      ; '1' clears running time
+KEY_TIME_RESET  EQU 0x0A      ; '1' clears running time
 
 ;=========================================================
 ; LCD + SWITCH
@@ -1684,7 +1684,7 @@ main:
     setb PWM
     setb EA
 
-    lcall ELCD_4BIT
+    lcall LCD_4BIT
     lcall LCD_Update
     lcall HEX_ShowInput
 
