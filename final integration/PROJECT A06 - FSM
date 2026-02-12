@@ -247,6 +247,70 @@ InitSerialPort:
     setb TR2
     mov SCON,#52h
     ret
+    
+    ; Send one byte (A) out UART (blocking)
+UART_SendByte:
+    clr TI
+    mov SBUF, A
+Wait_TI:
+    jnb TI, Wait_TI
+    ret
+UART_SendHello:
+    mov a, ms_count+0
+    orl a, ms_count+1
+    jnz UP_done          ; only when ms_count==0 (1 Hz boundary)
+
+    mov a, #'H'  ; "HI\r\n"
+    lcall UART_SendByte
+    mov a, #'I'
+    lcall UART_SendByte
+    mov a, #13
+    lcall UART_SendByte
+    mov a, #10
+    lcall UART_SendByte
+UART_SendCRLF:
+    mov a, #13
+    lcall UART_SendByte
+    mov a, #10
+    lcall UART_SendByte
+    ret
+
+; A = 0..9 -> sends ASCII '0'..'9'
+UART_SendDigit:
+    add a, #'0'
+    lcall UART_SendByte
+    ret
+    
+UART_Print_OvenTemp:
+    ; only once per second (same timing style you use elsewhere)
+    mov a, ms_count+0
+    orl a, ms_count+1
+    jnz UP_done
+
+    ; convert oven_temp -> R0 R1 R2 using existing routine
+    lcall Bin16_To_3Digits
+
+    ; optional label "T="
+    mov a, #'T'
+    lcall UART_SendByte
+    mov a, #'='
+    lcall UART_SendByte
+
+    ; send digits
+    mov a, R0
+    lcall UART_SendDigit
+    mov a, R1
+    lcall UART_SendDigit
+    mov a, R2
+    lcall UART_SendDigit
+
+    lcall UART_SendCRLF
+UP_done:
+    ret        
+
+
+
+
 
 ;=========================================================
 ; TIMER0 (AUDIO TONE)
@@ -1798,10 +1862,10 @@ RUN_NORMAL:
     lcall OvenTemp_Update           ; <-- replaces fake temp generator
     lcall Temp_Stall_Check
     lcall FSM_Control
-
+	;lcall UART_SendHello
     lcall Beep_On_State_Change
     lcall Do_ExtraBeeps
-
+	lcall UART_Print_OvenTemp
     lcall Display_Status_All
     sjmp loop
 
