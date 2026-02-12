@@ -110,6 +110,12 @@ serial_frame.grid_columnconfigure(0, weight=1)
 #create frame for status
 status_frame = LabelFrame(root, text='Status Indicator', padx=5, pady=5)
 status_frame.grid(row=0, column=1, padx=20, pady=20, sticky='nsew', columnspan=1, rowspan=1)
+status_frame.grid_columnconfigure((0,1), weight=1)
+#subframes within status frame
+radio_frame = Frame(status_frame)
+radio_frame.grid(row=0, column=0, sticky='nsew', padx=5, pady=5)
+clock_frame = Frame(status_frame)
+clock_frame.grid(row=0, column=1, sticky='nsew', padx=5, pady=5)
 
 #create frame for ovenai
 ovenai_frame = LabelFrame(root, text='OVEN AI', padx=5, pady=5)
@@ -141,12 +147,12 @@ poly_verts_C, poly_verts_F, poly_colors, poly_C, poly_F = [], [], [], None, None
 PORTS = ['COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9']
 DATA = ['Receive', 'Transmit']
 MODES = [
-    ('Inactive', 0),
-    ('Ramp to Soak', 1),
-    ('Preheat/Soak', 2),
-    ('Ramp to Peak', 3),
-    ('Reflow', 4),
-    ('Cooling', 5)
+    ('0 Inactive', 0),
+    ('1 Ramp to Soak', 1),
+    ('2 Preheat/Soak', 2),
+    ('3 Ramp to Peak', 3),
+    ('4 Reflow', 4),
+    ('5 Cooling', 5)
 ]
 soak_temp, soak_time, reflow_temp, reflow_time, ai_comment = 0, 0, 0, 0, None
 
@@ -163,6 +169,19 @@ COLORS = [
     ]
 thermal_map = LinearSegmentedColormap.from_list('thermal', COLORS, N=256)
 
+# loading jesus clock
+jesus_images={}
+jesus_photo_images={}
+
+for i in range(6):
+    try:
+        img = Image.open(f'gui/jesus{i}.png')
+        img=img.resize((800,400), Image.Resampling.LANCZOS)
+        jesus_photo_images[i] = ImageTk.PhotoImage(img)
+        jesus_images[i] = img
+    except Exception as e:
+        print(f'Failed to load jesus{i} png: {e}')
+
 # INPUT FUNCTIONS
 
 #initializing serial data communication
@@ -178,7 +197,7 @@ def init_serial(port):
         
         ser = serial.Serial(
             port=port,
-            baudrate=115200,
+            baudrate=9600,
             parity=serial.PARITY_NONE,
             stopbits=serial.STOPBITS_ONE,
             bytesize=serial.EIGHTBITS,
@@ -190,7 +209,7 @@ def init_serial(port):
         print(f'Failed to connect to {port}: {e}')
         ser = None
         return False
-    
+
 def on_port_change(*args):
     global current_port
     new_port = ports_var.get()
@@ -247,7 +266,7 @@ def get_ai_output(user_input):
             "soak_temp, soak_time, reflow_temp, reflow_time, shortcomment"
 
             Rules for your response:
-            1. soak_temp and reflow_temp are measured in Celsius and must not exceed 250 Celsius. soak_time and reflow_time are measure in Seconds.
+            1. soak_temp and reflow_temp are measured in Celsius and must not exceed 240 Celsius. soak_time and reflow_time are measure in Seconds.
             2. Usually, if input is unsafe or unrelated (whether that be the nature of the prompt or your potential response), return: "0, 0, 0, 0, Error: Safety/Relevance Breach"
             3. No prose or extra text. Use integers for the first 4 values. The short comment justifies your settings briefly.
 
@@ -302,6 +321,16 @@ def get_ai_output(user_input):
 # update mode from serial
 def update_mode(new_value):
     mode_var.set(new_value)
+    update_jesus_clock(new_value)
+
+def update_jesus_clock(mode):
+    try:
+        mode_int = int(mode)
+        if mode_int in jesus_photo_images:
+            jesus_clock_label.config(image=jesus_photo_images[mode_int])
+            jesus_clock_label.image=jesus_photo_images[mode_int]
+    except Exception as e:
+        print(f'Error updating Jesus clock: {e}')
 
 # check if user tried to select 'transmit' while AI is empty
 def validate_mode_change(*args):
@@ -392,8 +421,8 @@ def send_oven_email(subject, body, attachments=None):
 
 # interpolate thermal fill colour
 def get_thermal_hex(temp):
-    # Maps from 25 - 250 > 0.0 - 1.0
-    norm = (temp-25)/(250-25)
+    # Maps from 25 - 240 > 0.0 - 1.0
+    norm = (temp-25)/(240-25)
     norm = max(0, min(norm, 1.0))
 
     rgba = thermal_map(norm)
@@ -535,14 +564,14 @@ def animate(_):
             # axC.fill_between(timeS_x[-2:], tempC_y[-2:], color=current_hex, alpha=1)
             # axF.fill_between(timeS_x[-2:], tempF_y[-2:], color=current_hex, alpha=1)
 
-        # updating legend with max/min/current temperatures
+        # updating legend with max/min/current temperatures 
         maxC_t = max(tempC_y)
         minC_t = min(tempC_y)
         axC.legend([f'READING: {tempC_data:.2f}$^o$C\nMAX: {maxC_t:.2f}$^o$C\nMIN: {minC_t:.2f}$^o$C'], loc='upper left', handlelength=0, handletextpad=0)
         maxF_t = max(tempF_y)
         minF_t = min(tempF_y)
         axF.legend([f'READING: {tempF_data:.2f}$^o$F\nMAX: {maxF_t:.2f}$^o$F\nMIN: {minF_t:.2f}$^o$F'], loc='upper left', handlelength=0, handletextpad=0)
-        
+
         # adjust scale of the graph
         axC.relim()
         axC.autoscale_view()
@@ -608,8 +637,13 @@ mode_var.set(0)
 
 # create disabled radiobuttons
 for i, (mode_text, mode_value) in enumerate(MODES):
-    mode_rb = Radiobutton(status_frame, variable=mode_var, text=mode_text, value=mode_value, state='disabled')
-    mode_rb.grid(row=i, column=0, sticky='w')
+    mode_rb = Radiobutton(radio_frame, variable=mode_var, text=mode_text, value=mode_value, state='disabled')
+    mode_rb.grid(row=i, column=0, sticky='w', padx=5)
+
+# create jesus clock label
+jesus_clock_label = Label(clock_frame)
+jesus_clock_label.pack(expand=True, fill='both')
+update_jesus_clock(mode_var.get())
 
 # EXPORT CSV AND IMG R2-C0
 
