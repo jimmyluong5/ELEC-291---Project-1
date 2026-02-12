@@ -309,16 +309,16 @@ Timer1_ISR:
     ; ===== PWM =====
     mov a, PWM_duty
     cjne a, #100, pwm1_normal
-    setb PWM
+    clr PWM
     sjmp pwm1_update_counter
 
 pwm1_normal:
     mov a, PWM_counter
     jnz pwm1_p1
-    setb PWM
+    clr PWM
 pwm1_p1:
     cjne a, PWM_duty, pwm1_p2
-    clr PWM
+    setb PWM
 pwm1_p2:
 
 pwm1_update_counter:
@@ -1035,10 +1035,13 @@ FSM_Control:
     jb paused_flag, FSM_pause_ret
     jb error_demo_flag, FSM_pause_ret
 
-    mov a, run_flag
+   mov a, run_flag
     jnz FSM_go
     mov state, #0
+    ; If in duty edit mode, keep user PWM running
+    jb duty_mode, FSM_not_running_keep
     lcall Set_PWM_Off
+FSM_not_running_keep:
     ret
 
 FSM_pause_ret:
@@ -1050,9 +1053,11 @@ FSM_go:
 
 FSM_s0:
     cjne a, #0, FSM_s1
+    jb duty_mode, FSM_s0_keep
     lcall Set_PWM_Off
     ret
-
+FSM_s0_keep:
+    ret
 FSM_s1:
     cjne a, #1, FSM_s2
     lcall Set_PWM_Full
