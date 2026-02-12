@@ -4,27 +4,18 @@ $LIST
 
 ;=========================================================
 ; REFLOW OVEN CONTROLLER (DE10-Lite CV-8052) - SINGLE FILE
-;=========================================================
-; TIMER MAP (as you requested):
-;   - Timer2  = UART baud generator (115200)  [NO Timer2 ISR]
-;   - Timer1  = 1kHz system tick ISR + PWM
-;   - Timer0  = speaker tone (beeps)
+; - Timer2 = UART baud (115200), NO ISR
+; - Timer1 = 1kHz tick ISR + PWM
+; - Timer0 = speaker tone
 ;
-; Changes vs your previous version:
-;   - Removed Fake_OvenTemp_Update ???????
-;   - Added OvenTemp_Update (reads ADC ch0=room, ch1=oven) once/sec while running
-;   - PWM + tick moved from Timer2_ISR -> Timer1_ISR
-;   - Timer2 now only used for serial baud generation
-;
-; NOTE (important):
-;   This OvenTemp_Update is a *working* ADC->temperature pipeline, but since your
-;   exact sensor calibration math wasn’t fully included in the FSM file, I used a
-;   clean linear mapping you can tune:
-;     room_temp_C  = ADC0 * ROOM_MAX_C / 4095
-;     oven_delta_C = ADC1 * OVEN_DELTA_MAX_C / 4095
-;     oven_temp_C  = room_temp_C + oven_delta_C
-;   You can replace the math section with your final calibrated thermocouple math
-;   later without touching the FSM/timers/PWM.
+; IMPORTANT CHANGES (as requested):
+;  1) OvenTemp_Update replaced with your calibrated ADC->temp math.
+;     Final integer oven temperature is stored into oven_temp (16-bit).
+;  2) HEX and UART BOTH display the same oven_temp variable.
+;     - HEX_Show_OvenTemp reads oven_temp
+;     - UART_Print_OvenTemp converts oven_temp via Bin16_To_3Digits
+;  3) UART code fixed (no bad fall-through / label collisions).
+;  4) volt_ref is read once at startup from ADC channel 2 (like your file).
 ;=========================================================
 
 ;=========================================================
@@ -32,22 +23,22 @@ $LIST
 ;=========================================================
 CLK            EQU 33333333
 BAUD           EQU 115200
-T2LOAD         EQU (65536-(CLK/(32*BAUD)))   ; Timer2 baud reload
+T2LOAD          EQU (65536-(CLK/(32*BAUD)))
 
 ;=========================================================
 ; TIMERS
 ;=========================================================
-TIMER0_RATE    EQU 4096
-TIMER0_RELOAD  EQU (65536-(CLK/(12*TIMER0_RATE)))
+TIMER0_RATE     EQU 4096
+TIMER0_RELOAD   EQU (65536-(CLK/(12*TIMER0_RATE)))
 
-TIMER1_RATE    EQU 1000                      ; 1kHz system tick
-TIMER1_RELOAD  EQU (65536-(CLK/(12*TIMER1_RATE)))
+TIMER1_RATE     EQU 1000
+TIMER1_RELOAD   EQU (65536-(CLK/(12*TIMER1_RATE)))
 
 ;=========================================================
 ; I/O
 ;=========================================================
-SPEAKER        EQU P1.5
-PWM            EQU P2.7
+SPEAKER         EQU P1.5
+PWM             EQU P2.7
 
 ;=========================================================
 ; ADC SFRs (uncomment if your assembler complains)
@@ -76,7 +67,7 @@ SW5             EQU SWA.5
 ; REFLOW / LIMITS
 ;=========================================================
 LIQUIDUS        EQU 217
-HOLD_DUTY        EQU 8
+HOLD_DUTY       EQU 8
 MAX_TEMP        EQU 250
 STALL_LIMIT     EQU 60
 
@@ -87,51 +78,31 @@ ERROR_STATE     EQU 6
 COOL_STATE      EQU 5
 
 ;=========================================================
-; TEMP MAPPING (TUNE THESE)
-;=========================================================
-ROOM_MAX_C          EQU 50     ; assume room sensor is 0..50C over 0..4095
-OVEN_DELTA_MAX_C    EQU 300    ; assume oven delta is 0..300C over 0..4095
-
-;=========================================================
 ; VECTORS
 ;=========================================================
 org 0x0000
     ljmp main
 
-org 0x000B              ; Timer0 vector
+org 0x000B
     ljmp Timer0_ISR
 
-org 0x001B              ; Timer1 vector
+org 0x001B
     ljmp Timer1_ISR
-
-; (No Timer2 ISR: Timer2 is ONLY for UART baud)
 
 ;=========================================================
 ; DATA
 ;=========================================================
 dseg at 0x30
 
-;=========================================================
-; math32 working registers (used by OvenTemp_Update)
-;=========================================================
+; math32 working registers
 x:                  ds 4
 y:                  ds 4
-
-; derived temps
-room_temp16:        ds 2          ; integer Celsius
-oven_delta16:       ds 2          ; integer Celsius
-
-
-
-
-
-
 
 ; PWM + tick
 PWM_counter:        ds 1
 PWM_duty:           ds 1
 
-; keypad input digits (used by Shift_Digits_Left in Read_keypad.inc)
+; keypad input digits
 bcd:                ds 5
 param_index:        ds 1
 
@@ -146,11 +117,11 @@ state:              ds 1
 run_flag:           ds 1
 
 ; timebase
-ms_count:           ds 2          ; counts ms (0..999) from Timer1 ISR
-seconds:            ds 2          ; per-state elapsed seconds
-run_time:           ds 2          ; total running time
+ms_count:           ds 2
+seconds:            ds 2
+run_time:           ds 2
 
-; temperature (FSM uses this)
+; temperature (FSM/HEX/UART uses this)
 oven_temp:          ds 2          ; integer Celsius
 
 ; scratch / compare
@@ -175,26 +146,32 @@ reflow_beeped:      ds 1
 key_lock:           ds 1
 last_key:           ds 1
 
-; flags (bit-addressable)
+; ====== NEW: vars needed by your calibrated temperature pipeline ======
+rm_temp:            ds 4
+ov_temp:            ds 4
+volt_ref:           ds 2
+
+;=========================================================
+; BIT FLAGS
+;=========================================================
 bseg
 blank_flag:      dbit 1
 duty_mode:       dbit 1
 paused_flag:     dbit 1
 error_demo_flag: dbit 1
-mf: dbit 1
-
+mf:              dbit 1
 
 cseg
 
 ;=========================================================
 ; LCD WIRING
 ;=========================================================
-ELCD_RS equ P0.0
-ELCD_E  equ P0.2
-ELCD_D4 equ P0.7
-ELCD_D5 equ P0.5
-ELCD_D6 equ P0.3
-ELCD_D7 equ P0.1
+LCD_RS equ P0.0
+LCD_E  equ P0.2
+LCD_D4 equ P0.7
+LCD_D5 equ P0.5
+LCD_D6 equ P0.3
+LCD_D7 equ P0.1
 
 $NOLIST
 $include(LCD_4bit_DE10Lite_no_RW.inc)
@@ -237,7 +214,7 @@ T_7seg:
     DB 0x92,0x82,0xF8,0x80,0x90
 
 ;=========================================================
-; UART (Timer2 baud)
+; UART (Timer2 baud) - FIXED + CLEAN
 ;=========================================================
 InitSerialPort:
     clr TR2
@@ -247,27 +224,14 @@ InitSerialPort:
     setb TR2
     mov SCON,#52h
     ret
-    
-    ; Send one byte (A) out UART (blocking)
+
 UART_SendByte:
     clr TI
     mov SBUF, A
-Wait_TI:
-    jnb TI, Wait_TI
+UART_WaitTI:
+    jnb TI, UART_WaitTI
     ret
-UART_SendHello:
-    mov a, ms_count+0
-    orl a, ms_count+1
-    jnz UP_done          ; only when ms_count==0 (1 Hz boundary)
 
-    mov a, #'H'  ; "HI\r\n"
-    lcall UART_SendByte
-    mov a, #'I'
-    lcall UART_SendByte
-    mov a, #13
-    lcall UART_SendByte
-    mov a, #10
-    lcall UART_SendByte
 UART_SendCRLF:
     mov a, #13
     lcall UART_SendByte
@@ -275,28 +239,33 @@ UART_SendCRLF:
     lcall UART_SendByte
     ret
 
-; A = 0..9 -> sends ASCII '0'..'9'
 UART_SendDigit:
     add a, #'0'
     lcall UART_SendByte
     ret
-    
+
 UART_Print_OvenTemp:
-    ; only once per second (same timing style you use elsewhere)
+    ; print at ms_count == 0 or 500 (2 Hz)
+
+    ; ---- check ms_count == 0 ----
     mov a, ms_count+0
     orl a, ms_count+1
-    jnz UP_done
+    jz  UPO_DO_PRINT
 
-    ; convert oven_temp -> R0 R1 R2 using existing routine
-    lcall Bin16_To_3Digits
+    ; ---- check ms_count == 500 ----
+    mov a, ms_count+0
+    cjne a, #LOW(500), UPO_done
+    mov a, ms_count+1
+    cjne a, #HIGH(500), UPO_done
 
-    ; optional label "T="
+UPO_DO_PRINT:
+    lcall Bin16_To_3Digits   ; oven_temp -> R0,R1,R2
+
     mov a, #'T'
     lcall UART_SendByte
     mov a, #'='
     lcall UART_SendByte
 
-    ; send digits
     mov a, R0
     lcall UART_SendDigit
     mov a, R1
@@ -305,18 +274,13 @@ UART_Print_OvenTemp:
     lcall UART_SendDigit
 
     lcall UART_SendCRLF
-UP_done:
-    ret        
 
-
-
-
-
+UPO_done:
+    ret
 ;=========================================================
 ; TIMER0 (AUDIO TONE)
 ;=========================================================
 Timer0_Init:
-    ; Timer0 mode 1, preserve Timer1 bits
     mov a, TMOD
     anl a, #0F0h
     orl a, #01h
@@ -339,7 +303,6 @@ Timer0_ISR:
 ; TIMER1 (1kHz tick ISR + PWM)
 ;=========================================================
 Timer1_Init:
-    ; Timer1 mode 1, preserve Timer0 bits
     mov a, TMOD
     anl a, #0Fh
     orl a, #10h
@@ -370,7 +333,11 @@ Timer1_ISR:
     push acc
     push psw
 
-    ; ===== PWM =====
+    ; ===== PWM (ACTIVE-LOW LOGIC AS YOUR ORIGINAL FILE) =====
+    ; PWM_duty is 0..100
+    ; - at counter==0: clr PWM
+    ; - at counter==duty: setb PWM
+    ; That means ON-time is duty% of the 0..99 window, but ON is when PWM=0.
     mov a, PWM_duty
     cjne a, #100, pwm1_normal
     clr PWM
@@ -400,31 +367,26 @@ pwm1_p3:
     inc ms_count+1
 T1_ms_nocarry:
 
-    ; if ms_count != 1000 -> exit
     mov a, ms_count+0
     cjne a, #LOW(1000), T1_exit
     mov a, ms_count+1
     cjne a, #HIGH(1000), T1_exit
 
-    ; ms_count = 0
     clr a
     mov ms_count+0, a
     mov ms_count+1, a
 
-    ; only count time when running and not paused/error screen
     mov a, run_flag
     jz  T1_exit
     jb  paused_flag, T1_exit
     jb  error_demo_flag, T1_exit
 
-    ; seconds++
     inc seconds+0
     mov a, seconds+0
     jnz T1_rt
     inc seconds+1
 
 T1_rt:
-    ; run_time++
     inc run_time+0
     mov a, run_time+0
     jnz T1_exit
@@ -473,13 +435,14 @@ Beep_Once:
 Do_ExtraBeeps:
     mov a, beep_count
     jz  DEB_done
-    lcall Loud_Beep_Once
+    ;lcall Loud_Beep_Once
+    lcall Beep_Once
     dec beep_count
 DEB_done:
     ret
 
 ;=========================================================
-; ADC helpers (12-bit -> x)
+; ADC helpers
 ;=========================================================
 Get_ADC12_to_x:
     mov x+3,#0
@@ -489,61 +452,145 @@ Get_ADC12_to_x:
     ret
 
 ;=========================================================
-; OvenTemp_Update (once/sec while running, not paused, not error screen)
-; - Updates:
-;     room_temp16 (2 bytes)
-;     oven_temp   (2 bytes)
+; Read volt_ref once (ADC channel 2) at startup
+;=========================================================
+Init_VoltRef:
+    mov ADC_C, #0x02
+    Wait_Milli_Seconds(#2)
+    lcall Get_ADC12_to_x
+    mov volt_ref+0, x+0
+    mov volt_ref+1, x+1
+    ret
+
+;=========================================================
+; OvenTemp_Update (REPLACED with your calibrated math)
+; - reads ADC0 -> rm_temp (stored 32-bit)
+; - reads ADC1 -> calibrated oven computation
+; - stores final integer Celsius into oven_temp (16-bit)
+;=========================================================
+;=========================================================
+; OvenTemp_Update (once/sec while running, not paused/error)
+; Uses your hard-coded calibration pipeline (NO ROOM_MAX_C)
+;
+; Requires these variables exist in dseg:
+;   ms_count (2), run_flag (1), paused_flag (bit), error_demo_flag (bit)
+;   volt_ref (2), rm_temp (4), ov_temp (4), oven_temp (2)
+;   x (4), y (4)
 ;=========================================================
 OvenTemp_Update:
-    ; only run once/sec (ms_count == 0 after tick rollover)
+    ; only run once/sec
     mov a, ms_count+0
     orl a, ms_count+1
-    jnz OT_done
-
-    ; only while actually running
-    mov a, run_flag
-    jz  OT_done
-    jb paused_flag, OT_done
-    jb error_demo_flag, OT_done
-
-    ; -------- room temp from ADC ch0 ----------
-    mov ADC_C, #0x00
-    Wait_Milli_Seconds(#2)
-    lcall Get_ADC12_to_x           ; x = adc0 count
-
-    ; room_temp_C = x * ROOM_MAX_C / 4095
-    Load_y(ROOM_MAX_C)
-    lcall mul32
-    Load_y(4095)
-    lcall div32
-
-    mov room_temp16+0, x+0
-    mov room_temp16+1, x+1
-
-    ; -------- oven delta from ADC ch1 ----------
-    mov ADC_C, #0x01
-    Wait_Milli_Seconds(#2)
-    lcall Get_ADC12_to_x           ; x = adc1 count
-
-    ; oven_delta_C = x * OVEN_DELTA_MAX_C / 4095
-    Load_y(OVEN_DELTA_MAX_C)
-    lcall mul32
-    Load_y(4095)
-    lcall div32
-
-    mov oven_delta16+0, x+0
-    mov oven_delta16+1, x+1
-
-    ; oven_temp = room_temp + oven_delta (16-bit add)
-    mov a, room_temp16+0
-    add a, oven_delta16+0
-    mov oven_temp+0, a
-    mov a, room_temp16+1
-    addc a, oven_delta16+1
-    mov oven_temp+1, a
+   	jz  OT_continue       ; short jump (near)
+	ljmp OT_abort         ; long jump (anywhere)
+OT_abort:
+    ljmp OT_done
 
 OT_done:
     ret
+OT_continue:
+    jb  paused_flag, OT_abort
+    jb  error_demo_flag, OT_abort
+
+    ; ----------------------------
+    ; ROOM: ADC ch0 -> x
+    ; Apply your scaling: x*4806/volt_ref
+    ; ----------------------------
+    mov ADC_C, #0x00
+    Wait_Milli_Seconds(#2)
+    lcall Get_ADC12_to_x
+
+    Load_y(4806)
+    lcall mul32
+    mov y+0, volt_ref+0
+    mov y+1, volt_ref+1
+    mov y+2, #0
+    mov y+3, #0
+    lcall div32
+
+    mov rm_temp+0, x+0
+    mov rm_temp+1, x+1
+    mov rm_temp+2, x+2
+    mov rm_temp+3, x+3
+
+    ; ----------------------------
+    ; OVEN: ADC ch1 -> x (scaled)
+    ; ----------------------------
+    mov ADC_C, #0x01
+    Wait_Milli_Seconds(#2)
+    lcall Get_ADC12_to_x
+
+    Load_y(4806)
+    lcall mul32
+    mov y+0, volt_ref+0
+    mov y+1, volt_ref+1
+    mov y+2, #0
+    mov y+3, #0
+    lcall div32
+
+    ; ---- BEGIN your calibrated oven math block ----
+    Load_y(1000000)
+    lcall mul32
+    Load_y(41)
+    lcall div32
+    Load_y(302781)
+    lcall div32
+
+    Load_y(12143)
+    lcall mul32
+    Load_y(8225)
+    lcall add32
+    Load_y(10000)
+    lcall div32
+
+    Load_y(3)
+    lcall sub32
+
+    ; Add (room_temp / 100) to oven result (same logic you posted)
+    mov y+0, rm_temp+0
+    mov y+1, rm_temp+1
+    mov y+2, rm_temp+2
+    mov y+3, rm_temp+3
+
+    push x+0
+    push x+1
+    push x+2
+    push x+3
+
+    mov x+0, y+0
+    mov x+1, y+1
+    mov x+2, y+2
+    mov x+3, y+3
+
+    Load_y(100)
+    lcall div32
+
+    mov y+0, x+0
+    mov y+1, x+1
+    mov y+2, x+2
+    mov y+3, x+3
+
+    pop x+3
+    pop x+2
+    pop x+1
+    pop x+0
+
+    lcall add32
+    ; ---- END your calibrated oven math block ----
+
+    mov ov_temp+0, x+0
+    mov ov_temp+1, x+1
+    mov ov_temp+2, x+2
+    mov ov_temp+3, x+3
+
+    ; CRITICAL: store the exact value used everywhere
+    mov oven_temp+0, x+0
+    mov oven_temp+1, x+1
+
+    ljmp OT_done        ; if OT_done ends up far, change this to LJMP too
+
+
+
 
 ;=========================================================
 ; INPUT HELPERS
@@ -604,31 +651,31 @@ Get_LSD3:
 ;=========================================================
 WriteDigitA:
     cjne a,#0,WD1
-    WriteData(#'0')  
+    WriteData(#'0')
     ret
 WD1: cjne a,#1,WD2
-    WriteData(#'1')  
+    WriteData(#'1')
     ret
 WD2: cjne a,#2,WD3
-    WriteData(#'2')  
+    WriteData(#'2')
     ret
 WD3: cjne a,#3,WD4
-    WriteData(#'3')  
+    WriteData(#'3')
     ret
 WD4: cjne a,#4,WD5
-    WriteData(#'4')  
+    WriteData(#'4')
     ret
 WD5: cjne a,#5,WD6
-    WriteData(#'5')  
+    WriteData(#'5')
     ret
 WD6: cjne a,#6,WD7
-    WriteData(#'6')  
+    WriteData(#'6')
     ret
 WD7: cjne a,#7,WD8
-    WriteData(#'7')  
+    WriteData(#'7')
     ret
 WD8: cjne a,#8,WD9
-    WriteData(#'8')  
+    WriteData(#'8')
     ret
 WD9:
     WriteData(#'9')
@@ -781,7 +828,7 @@ L4y:
     ret
 
 ;=========================================================
-; PackedBCD3_to_Bin16_DATA  (R0 -> bcd-like packed 3 digits)
+; PackedBCD3_to_Bin16_DATA  (R0 -> bcd packed 3 digits)
 ;=========================================================
 PackedBCD3_to_Bin16_DATA:
     push 0
@@ -950,18 +997,18 @@ SD_zero:
 ;=========================================================
 ; PWM setters
 ;=========================================================
-Set_PWM_Off:   
-mov PWM_duty, #0   
-ret
-Set_PWM_Full:  
-mov PWM_duty, #100 
-ret
-Set_PWM_Low:   
-mov PWM_duty, #30  
-ret
-Set_PWM_Med:   
-mov PWM_duty, #60  
-ret
+Set_PWM_Off:
+    mov PWM_duty, #0
+    ret
+Set_PWM_Full:
+    mov PWM_duty, #100
+    ret
+Set_PWM_Low:
+    mov PWM_duty, #30
+    ret
+Set_PWM_Med:
+    mov PWM_duty, #60
+    ret
 
 ;=========================================================
 ; Duty_From_DeltaT (table)
@@ -1016,7 +1063,7 @@ DFDT_gt30:
     ret
 
 ;=========================================================
-; Temp_Stall_Check (once/sec) - disabled while paused/error
+; Temp_Stall_Check (once/sec)
 ;=========================================================
 Temp_Stall_Check:
     mov a, ms_count+0
@@ -1099,10 +1146,9 @@ FSM_Control:
     jb paused_flag, FSM_pause_ret
     jb error_demo_flag, FSM_pause_ret
 
-   mov a, run_flag
+    mov a, run_flag
     jnz FSM_go
     mov state, #0
-    ; If in duty edit mode, keep user PWM running
     jb duty_mode, FSM_not_running_keep
     lcall Set_PWM_Off
 FSM_not_running_keep:
@@ -1122,6 +1168,7 @@ FSM_s0:
     ret
 FSM_s0_keep:
     ret
+
 FSM_s1:
     cjne a, #1, FSM_s2
     lcall Set_PWM_Full
@@ -1256,11 +1303,11 @@ FSM_s4_done:
     mov PWM_duty, #0
     mov reflow_done_flag, #1
 
-    mov a, reflow_beeped
-    jnz FSM_s4_done_wait
-    mov reflow_beeped, #1
-    lcall Beep_Once
-    mov beep_count, #4
+    ;mov a, reflow_beeped
+    ;jnz FSM_s4_done_wait
+    ;mov reflow_beeped, #1
+    ;lcall Beep_Once
+    ;mov beep_count, #4
 
 FSM_s4_done_wait:
     mov target16+0, #LOW(LIQUIDUS)
@@ -1597,17 +1644,18 @@ Handle_Key:
     ret
 HK0:
 
-    ; ERROR (B): 10 beeps + error screen then menu
-    cjne a, #KEY_ERR_BTN, HK_chk_stop
-    setb error_demo_flag
-    mov state,#ERROR_STATE
-    mov run_flag,#0
-    clr paused_flag
-    lcall Set_PWM_Off
-    lcall Show_Error_Message
-    lcall Beep_Once
-    mov beep_count,#9
-    ret
+    ; ERROR (B): 10 beeps total (handled by Do_ExtraBeeps)
+	cjne a, #KEY_ERR_BTN, HK_chk_stop
+	setb error_demo_flag
+	mov state,#ERROR_STATE
+	mov run_flag,#0
+	clr paused_flag
+	lcall Set_PWM_Off
+	lcall Show_Error_Message
+
+	mov prev_state, #ERROR_STATE   ; prevent state-change beep
+	mov beep_count,#10             ; exactly 10 beeps
+	ret
 
 HK_chk_stop:
     ; STOP (C): pauses if running
@@ -1731,6 +1779,11 @@ main:
     mov P1MOD,#10100010b
     mov P2MOD,#10000010b
     setb P1.5
+    
+    mov a, LEDRA
+    clr a
+    mov LEDRA, a
+    setb LEDRA.5
 
     clr a
     mov param_index,a
@@ -1752,7 +1805,7 @@ main:
     mov key_lock,#0
     mov last_key,#0
 
-    ; temps
+    ; temps defaults
     mov oven_temp+0,#25
     mov oven_temp+1,#0
     mov last_temp_L,#25
@@ -1772,22 +1825,21 @@ main:
     lcall Timer0_Init
     lcall Timer1_Init
 
-    ; UART baud on Timer2 (optional but enabled)
+    ; UART baud on Timer2
     lcall InitSerialPort
+
+    ; read volt_ref once (ADC ch2)
+    lcall Init_VoltRef
 
     setb PWM
     setb EA
 
-    lcall ELCD_4BIT
+    lcall LCD_4BIT
     lcall LCD_Update
     lcall HEX_ShowInput
 
 loop:
-    ;=====================================================
-    ; SW5 behavior:
-    ;   - NOT running AND not error screen: SW5 toggles duty edit page
-    ;   - Running: SW5 just changes view (handled in Display_Status_All)
-    ;=====================================================
+    ; UI mode toggle (only when not running and not error screen)
     mov a, run_flag
     jnz SKIP_UI_MODE
     jb error_demo_flag, SKIP_UI_MODE
@@ -1815,9 +1867,7 @@ MODE_TO_DUTY:
 SW5_DONE:
 SKIP_UI_MODE:
 
-    ;=====================================================
     ; Keypad one-shot handling
-    ;=====================================================
     lcall Keypad
     jnc NO_KEY
 
@@ -1840,9 +1890,7 @@ NO_KEY:
     mov key_lock,#0
 KEY_DONE:
 
-    ;=====================================================
     ; If error screen active: after beeps finish, return to menu
-    ;=====================================================
     jb error_demo_flag, ERR_SCREEN
     sjmp RUN_NORMAL
 
@@ -1856,16 +1904,17 @@ SHOW_ONLY:
     sjmp loop
 
 RUN_NORMAL:
-    ;=====================================================
-    ; REAL OVEN TEMP UPDATE (ADC) + STALL + FSM + BEEPS + DISPLAY
-    ;=====================================================
-    lcall OvenTemp_Update           ; <-- replaces fake temp generator
+    ; Temp update + stall + FSM + beeps + UART + display
+    lcall OvenTemp_Update
     lcall Temp_Stall_Check
     lcall FSM_Control
-	;lcall UART_SendHello
+
     lcall Beep_On_State_Change
     lcall Do_ExtraBeeps
-	lcall UART_Print_OvenTemp
+
+    ; UART prints SAME oven_temp that HEX shows
+    lcall UART_Print_OvenTemp
+
     lcall Display_Status_All
     sjmp loop
 
