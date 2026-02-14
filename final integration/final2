@@ -130,9 +130,8 @@ $LIST
 	
 	cseg
 	
-	;=========================================================
+	
 	; LCD WIRING
-	;=========================================================
 	LCD_RS equ P0.0
 	LCD_E  equ P0.2
 	LCD_D4 equ P0.7
@@ -266,9 +265,8 @@ $LIST
 	UPO_done:
 	    ret
 	
-	;=========================================================
-	; TIMER0 (AUDIO TONE)
-	;=========================================================
+
+
 	Timer0_Init:
 	    mov a, TMOD
 	    anl a, #0F0h
@@ -288,9 +286,8 @@ $LIST
 	    cpl SPEAKER
 	    reti
 	
-	;=========================================================
-	; TIMER1 (1kHz tick ISR + PWM)
-	;=========================================================
+	
+	
 	Timer1_Init:
 	    mov a, TMOD
 	    anl a, #0Fh
@@ -389,9 +386,8 @@ $LIST
 	    pop acc
 	    reti
 	
-	;=========================================================
-	; DELAYS + BEEPS
-	;=========================================================
+
+
 	Wait50ms:
 	    mov R0, #30
 	W50_L3: mov R1, #74
@@ -412,8 +408,12 @@ $LIST
 	    setb TR0
 	    lcall Wait50ms
 	    lcall Wait50ms
+	    lcall Wait50ms
+	    lcall Wait50ms
 	    clr  TR0
 	    clr  SPEAKER
+	    lcall Wait50ms
+	    lcall Wait50ms
 	    lcall Wait50ms
 	    lcall Wait50ms
 	    ret
@@ -421,8 +421,12 @@ $LIST
 	Beep_Once:
 	    setb TR0
 	    lcall Wait50ms
+	    lcall Wait50ms
+	    lcall Wait50ms
 	    clr  TR0
 	    clr  SPEAKER
+	    lcall Wait50ms
+	    lcall Wait50ms
 	    ret
 	
 	Do_ExtraBeeps:
@@ -434,9 +438,8 @@ $LIST
 	DEB_done:
 	    ret
 	
-	;=========================================================
-	; ADC helpers
-	;=========================================================
+	
+	
 	Get_ADC12_to_x:
 	    mov x+3,#0
 	    mov x+2,#0
@@ -444,9 +447,7 @@ $LIST
 	    mov x+0, ADC_L
 	    ret
 	
-	;=========================================================
-	; Read volt_ref once (ADC channel 2) at startup
-	;=========================================================
+	
 	Init_VoltRef:
 	    mov ADC_C, #0x02
 	    Wait_Milli_Seconds(#2)
@@ -455,26 +456,9 @@ $LIST
 	    mov volt_ref+1, x+1
 	    ret
 	
-	;=========================================================
-	; OvenTemp_Update (REPLACED with your calibrated math)
-	; - reads ADC0 -> rm_temp (stored 32-bit)
-	; - reads ADC1 -> calibrated oven computation
-	; - stores final integer Celsius into oven_temp (16-bit)
-	;=========================================================
-	;=========================================================
-	; OvenTemp_Update (once/sec while running, not paused/error)
-	; Uses your hard-coded calibration pipeline (NO ROOM_MAX_C)
-	;
-	; Requires these variables exist in dseg:
-	;   ms_count (2), run_flag (1), paused_flag (bit), error_demo_flag (bit)
-	;   volt_ref (2), rm_temp (4), ov_temp (4), oven_temp (2)
-	;   x (4), y (4)
-	;=========================================================
-	;=========================================================
-	; OvenTemp_Update (2 Hz: ms_count == 0 or 500)
-	; - skips when paused or in error screen
-	; - runs your full calibrated pipeline
-	;=========================================================
+
+
+
 	OvenTemp_Update:
 	    ; ---------- Check if it's time to update (ms_count == 0 OR 500) ----------
 	    mov a, ms_count+0
@@ -585,9 +569,8 @@ $LIST
 	OT_done:
 	    ret
 	
-	;=========================================================
-	; INPUT HELPERS
-	;=========================================================
+	
+	
 	Clear_Input:
 	    clr a
 	    mov bcd+0,a
@@ -597,10 +580,8 @@ $LIST
 	    mov bcd+4,a
 	    setb blank_flag
 	    ret
-	
-	;=========================================================
-	; LCD HELPERS
-	;=========================================================
+
+
 	LCD_Clear:
 	    WriteCommand(#01h)
 	    Wait_Milli_Seconds(#2)
@@ -621,9 +602,8 @@ $LIST
 	    djnz R0,L2C1
 	    ret
 	
-	;=========================================================
-	; GET LSD 3 DIGITS FROM BCD INTO R0/R1/R2
-	;=========================================================
+
+
 	Get_LSD3:
 	    mov a,bcd+0
 	    anl a,#0Fh
@@ -639,9 +619,7 @@ $LIST
 	    mov R0,a
 	    ret
 	
-	;=========================================================
-	; WriteDigitA
-	;=========================================================
+	
 	WriteDigitA:
 	    cjne a,#0,WD1
 	    WriteData(#'0')
@@ -673,10 +651,8 @@ $LIST
 	WD9:
 	    WriteData(#'9')
 	    ret
-	
-	;=========================================================
-	; LCD_ShowInput
-	;=========================================================
+
+
 	LCD_ShowInput:
 	    lcall LCD_ClearValueArea
 	    jb blank_flag, LSI_done
@@ -715,9 +691,7 @@ $LIST
 	LSI_done:
 	    ret
 	
-	;=========================================================
-	; HEX_ShowInput
-	;=========================================================
+	
 	HEX_ShowInput:
 	    mov dptr,#T_7seg
 	    jb blank_flag, HX_blank
@@ -763,9 +737,7 @@ $LIST
 	    mov HEX5,#0FFh
 	    ret
 	
-	;=========================================================
-	; LCD_Update (ONLY when NOT running and not in error screen)
-	;=========================================================
+	
 	LCD_Update:
 	    lcall LCD_Clear
 	    lcall LCD_ClearLine2
@@ -820,9 +792,6 @@ $LIST
 	    Send_Constant_String(#profile_ready)
 	    ret
 	
-	;=========================================================
-	; PackedBCD3_to_Bin16_DATA  (R0 -> bcd packed 3 digits)
-	;=========================================================
 	PackedBCD3_to_Bin16_DATA:
 	    push 0
 	    push acc
@@ -870,9 +839,7 @@ $LIST
 	    pop 0
 	    ret
 	
-	;=========================================================
-	; GE16: C=1 if tmp16 >= target16
-	;=========================================================
+	
 	GE16:
 	    push acc
 	    mov a, tmp16+1
@@ -892,10 +859,7 @@ $LIST
 	    clr c
 	    pop acc
 	    ret
-	
-	;=========================================================
-	; Validate_Temp250: C=1 if <=250 else C=0
-	;=========================================================
+
 	Validate_Temp250:
 	    mov target16+0, #LOW(251)
 	    mov target16+1, #HIGH(251)
@@ -916,9 +880,7 @@ $LIST
 	    lcall LCD_ShowInput
 	    ret
 	
-	;=========================================================
-	; Save_Param (temp<=250 enforcement on temp pages)
-	;=========================================================
+;saving params
 	Save_Param:
 	    mov a,param_index
 	    cjne a,#0,SP1
@@ -955,10 +917,7 @@ $LIST
 	SP_bad:
 	    lcall Show_Invalid_Temp
 	    ret
-	
-	;=========================================================
-	; Save_Duty (0..100)
-	;=========================================================
+
 	Save_Duty:
 	    jb blank_flag, SD_zero
 	    lcall Get_LSD3
@@ -987,9 +946,8 @@ $LIST
 	    mov PWM_duty, #0
 	    ret
 	
-	;=========================================================
+
 	; PWM setters
-	;=========================================================
 	Set_PWM_Off:
 	    mov PWM_duty, #0
 	    ret
@@ -1003,9 +961,7 @@ $LIST
 	    mov PWM_duty, #60
 	    ret
 	
-	;=========================================================
-	; Duty_From_DeltaT (table)
-	;=========================================================
+
 	Duty_From_DeltaT:
 	    lcall GE16
 	    jnc DFDT_measured_lt_target
@@ -1055,12 +1011,8 @@ $LIST
 	    mov PWM_duty, #100
 	    ret
 	
-	;=========================================================
 	; Temp_Stall_Check (once/sec)
-	;=========================================================
-	;=========================================================
-	; Temp_Stall_Check (once/sec)
-	;=========================================================
+
 	Temp_Stall_Check:
 	    ; Check if ms_count == 0 (once per second)
 	    mov a, ms_count+0
@@ -1174,10 +1126,7 @@ Failsafe_50C_Check:
 FSC_done:
     ret
 
-	    
-	;=========================================================
-	; Beep_On_State_Change
-	;=========================================================
+
 	Beep_On_State_Change:
 	    mov a, state
 	    cjne a, prev_state, BOSC_changed
@@ -1201,9 +1150,7 @@ FSC_done:
 	BOSC_done:
 	    ret
 	
-	;=========================================================
-	; FSM_Control
-	;=========================================================
+
 	FSM_Control:
 	    jb paused_flag, FSM_pause_ret
 	    jb error_demo_flag, FSM_pause_ret
@@ -1458,9 +1405,7 @@ FSC_done:
 	FSM_ret_s5:
 	    ret
 	
-	;=========================================================
-	; Bin16 -> 3 digits (for oven_temp)
-	;=========================================================
+	
 	Bin16_To_3Digits:
 	    mov tmp16+0, oven_temp+0
 	    mov tmp16+1, oven_temp+1
@@ -1538,9 +1483,7 @@ FSC_done:
 	    mov HEX5,#0FFh
 	    ret
 	
-	;=========================================================
-	; LCD State Title
-	;=========================================================
+	
 	LCD_ShowStateTitle:
 	    mov a, state
 	    cjne a, #0, SST1
@@ -1577,9 +1520,7 @@ FSC_done:
 	    Send_Constant_String(#s_error)
 	    ret
 	
-	;=========================================================
-	; RunTime printing " t:xyz"
-	;=========================================================
+	
 	RunTime_To_3Digits:
 	    mov tmp16+0, run_time+0
 	    mov tmp16+1, run_time+1
@@ -1726,9 +1667,7 @@ FSC_done:
 	DSA_done:
 	    ret
 	
-	;=========================================================
-	; Return_To_Menu
-	;=========================================================
+
 	Return_To_Menu:
 	    mov run_flag,#0
 	    clr paused_flag
@@ -1745,9 +1684,7 @@ FSC_done:
 	    lcall HEX_ShowInput
 	    ret
 	
-	;=========================================================
-	; Handle_Key (one-shot)
-	;=========================================================
+	
 	Handle_Key:
 	    mov a, R7
 	
