@@ -5,7 +5,7 @@ myLUT:
     DB 0x92, 0x82, 0xF8, 0x80, 0x90
     DB 0x88, 0x83, 0xC6, 0xA1, 0x86, 0x8E
 
-; --- Macros from Keypad File ---
+
 showBCD MAC
     mov A, %0
     anl a, #0fh
@@ -30,7 +30,7 @@ MYRRC MAC
     mov %0, a
 ENDMAC
 
-; Modified: key detected -> go validate/handle E/F/digit in one place
+
 CHECK_COLUMN MAC
     jb %0, CHECK_COL_%M
     mov R7, %1
@@ -149,13 +149,6 @@ keypad_90deg:
     ret
 
 
-; -----------------------------------------------------------------------------
-; Key handling (matches your sample logic)
-;   E (0x0E) = CLEAR
-;   F (0x0F) = ENTER -> validate 150..280 inclusive
-;   0..9 valid digit -> CY=1 (main shifts left + beeps)
-;   A..D (0x0A..0x0D) invalid -> ignore (CY=0)
-; -----------------------------------------------------------------------------
 Keypad_HandleKey:
     clr mf
 
@@ -210,9 +203,6 @@ KH_digit_ok:
     ret
 
 
-; -----------------------------------------------------------------------------
-; Buffer ops on bcd1 (your project uses bcd1 for keypad digits)
-; -----------------------------------------------------------------------------
 Clear_Buffer_bcd1:
     mov bcd1+0, #00H
     mov bcd1+1, #00H
@@ -223,15 +213,7 @@ Clear_Buffer_bcd1:
     ret
 
 
-; -----------------------------------------------------------------------------
-; Validate_Input_bcd1:
-;   Implements your logic: valid if 150 <= value <= 280
-;   We convert ONLY the lowest 3 digits from bcd1 into x (32-bit):
-;     ones  = low nibble of bcd1+0
-;     tens  = high nibble of bcd1+0
-;     hund  = low nibble of bcd1+1
-;   Then uses math32 comparisons: x_lt_y, x_gt_y and mf flag.
-; -----------------------------------------------------------------------------
+
 Validate_Input_bcd1:
     ; Build x = 100*hund + 10*tens + ones
     ; x is 32-bit little-endian: x+0 LSB
