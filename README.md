@@ -3,6 +3,7 @@ REFLOW OVEN CONTROLLER
 Our group used an incremental and iterative design approach which involved testing multiple modules of our project to ensure they work separately before integrating them together and testing their combined functionality.
 This allowed our team to divide tasks more effectively allowing everyone to work on a module of the project concurrently.
 <img width="619" height="274" alt="Screenshot 2026-05-03 184412" src="https://github.com/user-attachments/assets/e72cf652-d1b3-4a3d-b8b4-d0ca82744bd8" />
+
 1.1) Objective:
 The objective of this project was to create a control system for a Solid State Relay (SSR) Box powering a standard, off-the-shelf oven rated for 1500W, with the purpose of using the apparatus as a solder reflow oven.
 
